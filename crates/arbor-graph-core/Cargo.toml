@@ -1,0 +1,11 @@
+[package]
+name = "arbor-graph-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arbor-types = { path = "../arbor-types" }
+smallvec = "2.0.0-alpha.12"
+rapidhash = "4.1.1"
+uuid = { version = "1.18.1", features = ["v4"] }
+roaring = "0.11.2"

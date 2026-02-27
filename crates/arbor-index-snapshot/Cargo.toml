@@ -1,0 +1,10 @@
+[package]
+name = "arbor-index-snapshot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arbor-types = { path = "../arbor-types" }
+uuid = { version = "1.18.1", features = ["v4"] }
+rapidhash = "4.1.1"
+roaring = "0.11.2"

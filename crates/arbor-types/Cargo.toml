@@ -1,0 +1,12 @@
+[package]
+name = "arbor-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+roaring = "0.11.2"
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["v4", "v5"] }
+chrono = "0.4.42"
+ordered-float = "5.1.0"
+smallvec = "2.0.0-alpha.12"
