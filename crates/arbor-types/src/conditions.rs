@@ -1,7 +1,7 @@
 use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
 use crate::attributes::{AttributeValue, ScalarValue};
-use crate::ids::AttributeNameId;
+use crate::ids::{AttributeNameId, EntityTypeId};
 use uuid::Uuid;
 
 /// Policy Condition Operand types
@@ -38,7 +38,36 @@ pub enum Condition {
 
     HasAttribute(Operand, AttributeNameId), // e.g., entity HAS ATTRIBUTE "key"
 
-    InNetwork(Operand, Operand), // e.g., ip() IN network
+    // String operations
+    StartsWith(Operand, Operand),     // string.starts_with(prefix)
+    EndsWith(Operand, Operand),       // string.ends_with(suffix)
+    StringContains(Operand, Operand), // string.contains(substring) — distinct from set Contains
+    Like(Operand, Operand),           // glob pattern match: * matches any sequence of characters
+
+    // Entity type check (e.g., `principal is Admin`)
+    IsType(VariableScope, EntityTypeId),
+
+    /// Hierarchy membership check (e.g., `principal in Group::"admins"`).
+    ///
+    /// Left operand is the entity variable (principal/resource); right operand
+    /// is an EntityRef (UUID). The compiler resolves the UUID to a snapshot index
+    /// before emitting the `InHierarchy` opcode — the VM never sees UUIDs.
+    ///
+    /// Semantics: true if the entity IS the target or is a descendant of it.
+    /// Self-inclusive behaviour is guaranteed by the snapshot builder including
+    /// each entity's own index in its `ancestors` bitmap.
+    InHierarchy(Operand, Operand),
+
+    /// Set membership with hierarchy expansion (e.g., `principal.groups containsInHierarchy Group::"admins"`).
+    ///
+    /// Left operand is a set of EntityRefs (e.g., an attribute holding a list of group memberships).
+    /// Right operand is an EntityRef (UUID) representing the target ancestor.
+    /// The compiler resolves the right UUID to a snapshot index before emitting the opcode.
+    ///
+    /// Semantics: true if ANY element in the set is the target or a descendant of it.
+    ContainsInHierarchy(Operand, Operand),
+
+    InNetwork(Operand, Operand), // e.g., ip() IN network — V2
 }
 
 impl Condition {
@@ -61,11 +90,16 @@ impl Condition {
             | Condition::Lte(l, r) | Condition::Gt(l, r) | Condition::Gte(l, r)
             | Condition::In(l, r) | Condition::Contains(l, r)
             | Condition::ContainsAll(l, r) | Condition::ContainsAny(l, r)
+            | Condition::StartsWith(l, r) | Condition::EndsWith(l, r)
+            | Condition::StringContains(l, r) | Condition::Like(l, r)
+            | Condition::InHierarchy(l, r) | Condition::ContainsInHierarchy(l, r)
             | Condition::InNetwork(l, r) => {
                 Self::find_operand_dependencies(l, deps);
                 Self::find_operand_dependencies(r, deps);
             }
             Condition::HasAttribute(op, _) => Self::find_operand_dependencies(op, deps),
+            // IsType checks the entity's type directly — no attribute path dependency.
+            Condition::IsType(_, _) => {}
         }
     }
 

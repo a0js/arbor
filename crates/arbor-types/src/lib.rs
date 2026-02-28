@@ -7,6 +7,7 @@ mod bytecode;
 mod conditions;
 mod entities;
 mod policies;
+mod evaluation;
 
 pub use constants::*;
 pub use errors::*;
@@ -17,3 +18,4 @@ pub use bytecode::*;
 pub use conditions::*;
 pub use entities::*;
 pub use policies::*;
+pub use evaluation::*;

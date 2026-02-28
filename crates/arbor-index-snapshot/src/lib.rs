@@ -2,7 +2,7 @@ use std::ops::Sub;
 use rapidhash::RapidHashMap;
 use roaring::{MultiOps, RoaringBitmap};
 use uuid::Uuid;
-use arbor_types::{EntityTypeId, IndexedPolicyTarget, IndexedEntity, IndexedPolicy, IndexedEntityType, ArborError, ArborResult};
+use arbor_types::{EntityResolver, EntityTypeId, IndexedPolicyTarget, IndexedEntity, IndexedPolicy, IndexedEntityType, ArborError, ArborResult};
 
 pub struct Snapshot {
     pub uuid_to_index: RapidHashMap<Uuid, u32>,
@@ -155,8 +155,19 @@ impl Snapshot {
         let policy = self.indexed_policies.get(&policy_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", policy_idx)))?;
         Ok(policy.actions.clone())
     }
+}
 
+impl EntityResolver for Snapshot {
+    fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
+        self.indexed_entities.get(&index)
+    }
 
+    fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32> {
+        self.uuid_to_index.get(uuid).copied()
+    }
+}
+
+impl Snapshot {
     pub fn split_policy_map_for_authorization(
         &self,
         policy_bitmap: &RoaringBitmap,
