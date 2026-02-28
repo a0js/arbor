@@ -12,7 +12,7 @@
 //! ## Stack discipline
 //!
 //! The VM is a pure stack machine that pops right-to-left: for binary opcodes it
-//! pops the *right* operand first, then the *left*.  Therefore the compiler always
+//! pops the *right* operand first, then the *left*.  Therefore, the compiler always
 //! pushes LEFT then RIGHT before emitting a binary opcode.
 //!
 //! ## Example
@@ -21,9 +21,9 @@
 //! use std::collections::HashMap;
 //! use uuid::Uuid;
 //! use arbor_types::{
-//!     Condition, Operand, AttributeValue, OpCode, EntityResolver, IndexedEntity,
+//!     Condition, Operand, AttributeValue, OpCode, EntityResolver, IndexedEntity, CompileError
 //! };
-//! use arbor_bytecode::compiler::{BytecodeCompiler, CompileError};
+//! use arbor_bytecode::compiler::BytecodeCompiler;
 //!
 //! struct NoopResolver;
 //! impl EntityResolver for NoopResolver {
@@ -41,46 +41,9 @@
 //! assert_eq!(compiled.instructions.len(), 3); // PushScalar, PushScalar, Eq
 //! ```
 
-use arbor_types::{
-    AttributeValue, Condition, CompiledCondition, CompileWarning, EntityResolver,
-    OpCode, Operand, VariableRef, VariableScope,
-};
+use arbor_types::{AttributeValue, Condition, CompiledCondition, CompileWarning, EntityResolver, OpCode, Operand, VariableRef, VariableScope, CompileError};
 use uuid::Uuid;
 use tracing::warn;
-
-// ── Error type ───────────────────────────────────────────────────────────────
-
-/// Errors that can occur while compiling a [`Condition`] to bytecode.
-///
-/// Note: an `EntityRef` UUID that is not present in the current snapshot is
-/// **not** a compile error. The compiler emits a constant `false` for any
-/// unresolvable hierarchy target so that the policy is still indexed and will
-/// evaluate correctly once the referenced entity appears in a future snapshot.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompileError {
-    /// The operation is not supported in V1 (e.g., `InNetwork`).
-    UnsupportedOperation(String),
-
-    /// An operand type is invalid for the enclosing condition (e.g., a
-    /// non-`Variable` operand for `HasAttribute`, or a `Variable` inside a set
-    /// literal).
-    InvalidOperand(String),
-}
-
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnsupportedOperation(msg) => {
-                write!(f, "unsupported operation: {msg}")
-            }
-            Self::InvalidOperand(msg) => {
-                write!(f, "invalid operand: {msg}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompileError {}
 
 // ── Compiler ─────────────────────────────────────────────────────────────────
 
@@ -156,7 +119,14 @@ impl<'a> BytecodeCompiler<'a> {
     ) -> Result<(), CompileError> {
         match condition {
             // --- Bare operand ---------------------------------------------------
-            Condition::Operand(op) => self.compile_operand(ops, op)?,
+            Condition::Operand(op) => {
+                match op {
+                    Operand::Bool(b) => ops.push(OpCode::PushBool(*b)),
+                    _ => return Err(CompileError::InvalidOperand(
+                        "Bare operand in Condition must be Bool".into(),
+                    )),
+                }
+            }
 
             // --- Logical --------------------------------------------------------
             Condition::And(conds) => self.compile_and(ops, warnings, conds)?,
@@ -1275,37 +1245,30 @@ mod tests {
     fn bare_variable_operand() {
         let v = var(VariableScope::Principal, &[attr(7)]);
         let cond = Condition::Operand(Operand::Variable(v.clone()));
-        let ops = compile(&cond).unwrap();
-        assert_eq!(ops, vec![OpCode::PushVariable(v)]);
+        let err = compile(&cond).unwrap_err();
+        assert_eq!(err, CompileError::InvalidOperand("Bare operand in Condition must be Bool".into()));
     }
 
     #[test]
-    fn bare_scalar_operand() {
-        let cond = Condition::Operand(scalar_int(99));
+    fn bare_boolean_operand() {
+        let cond = Condition::Operand(scalar_bool(true));
         let ops = compile(&cond).unwrap();
-        assert_eq!(ops, vec![OpCode::PushInteger(99)]);
+        assert_eq!(ops, vec![OpCode::PushBool(true)]);
+    }
+
+    #[test]
+    fn bare_integer_operand() {
+        let cond = Condition::Operand(scalar_int(99));
+        let err = compile(&cond).unwrap_err();
+        assert_eq!(err, CompileError::InvalidOperand("Bare operand in Condition must be Bool".into()));
     }
 
     #[test]
     fn bare_entity_ref_operand() {
         let uuid = Uuid::new_v4();
         let cond = Condition::Operand(Operand::EntityRef(uuid));
-        let ops = compile(&cond).unwrap();
-        assert_eq!(ops, vec![OpCode::PushEntityRef(uuid)]);
-    }
-
-    #[test]
-    fn set_literal_with_variable_is_error() {
-        // Variables inside set literals must be rejected.
-        let bad_set = Operand::Set(vec![
-            Operand::Integer(1),
-            Operand::Variable(var(VariableScope::Principal, &[attr(1)])),
-        ]);
-        let err = compile(&Condition::Operand(bad_set)).unwrap_err();
-        assert_eq!(
-            err,
-            CompileError::InvalidOperand("Variable cannot appear inside a set literal".into())
-        );
+        let err = compile(&cond).unwrap_err();
+        assert_eq!(err, CompileError::InvalidOperand("Bare operand in Condition must be Bool".into()));
     }
 
     // ── Additional edge cases ────────────────────────────────────────────────

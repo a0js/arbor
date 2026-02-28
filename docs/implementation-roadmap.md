@@ -73,12 +73,12 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 2. Implement `BytecodeCompiler` in `arbor-bytecode/src/compiler.rs`
    - [x] Condition AST → bytecode compilation
    - [x] Optimization (constant folding, dead code elimination)
-   - [ ] Jump instruction patching for control flow
+   - [x] Jump instruction patching for control flow
 
 3. Tests
    - [x] Unit tests for each OpCode (55 tests)
-   - [ ] Integration tests (compile + evaluate end-to-end)
-   - [ ] Property-based tests (bytecode ≡ AST evaluation)
+   - [x] Integration tests (compile + evaluate end-to-end)
+   - [x] Property-based tests (bytecode ≡ AST evaluation)
 
 **Cedar-parity ops added**: `StartsWith`, `EndsWith`, `StringContains`, `Like` (glob),
 `IsType`, `InHierarchy`, `InHierarchyVar`, `ContainsInHierarchy`

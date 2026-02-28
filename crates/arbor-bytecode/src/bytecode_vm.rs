@@ -484,11 +484,13 @@ impl<'a> BytecodeVM<'a> {
         let subset = self.pop()?;
         let set = self.pop()?;
         let result = match (set, subset) {
-            (StackValue::Missing, _) | (_, StackValue::Missing) => false,
             (StackValue::Set(set_vals), StackValue::Set(subset_vals)) => subset_vals
                 .iter()
                 .all(|sub| set_vals.iter().any(|s| Self::attribute_value_eq(s, sub))),
-            _ => return Err("ContainsAll requires (set, set)".into()),
+            (StackValue::Set(_), StackValue::Missing)
+            | (StackValue::Missing, StackValue::Set(_))
+            | (StackValue::Missing, StackValue::Missing) => false,
+            _ => return Err("ContainsAll requires two sets".into()),
         };
         self.stack.push(StackValue::Bool(result));
         Ok(())
@@ -498,11 +500,13 @@ impl<'a> BytecodeVM<'a> {
         let subset = self.pop()?;
         let set = self.pop()?;
         let result = match (set, subset) {
-            (StackValue::Missing, _) | (_, StackValue::Missing) => false,
             (StackValue::Set(set_vals), StackValue::Set(subset_vals)) => subset_vals
                 .iter()
                 .any(|sub| set_vals.iter().any(|s| Self::attribute_value_eq(s, sub))),
-            _ => return Err("ContainsAny requires (set, set)".into()),
+            (StackValue::Set(_), StackValue::Missing)
+            | (StackValue::Missing, StackValue::Set(_))
+            | (StackValue::Missing, StackValue::Missing) => false,
+            _ => return Err("ContainsAny requires two sets".into()),
         };
         self.stack.push(StackValue::Bool(result));
         Ok(())

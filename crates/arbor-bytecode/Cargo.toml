@@ -10,3 +10,13 @@ ordered-float = "5.1.0"
 roaring = "0.11.2"
 tracing = "0.1"
 chrono = "0.4.42"
+
+[features]
+test_utils = []
+
+[dev-dependencies]
+proptest = "1.6.0"
+
+[[test]]
+name = "property_tests"
+required-features = ["test_utils"]
