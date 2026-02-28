@@ -3,6 +3,10 @@ use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, GraphError
 use roaring::RoaringBitmap;
 use crate::types::NodeType;
 
+/// Indices returned by `validate_policy_relationships`:
+/// (principal_index, resource_index, action_indices, action_set_indices)
+type PolicyRelIndices = (Option<u32>, Option<u32>, Vec<u32>, Vec<u32>);
+
 enum NodeNewOrExisting {
     New(u32),
     Existing(u32),
@@ -75,7 +79,7 @@ impl super::graph::Graph {
 
         self.clear_parental_relationships(entity_index);
         self.uuid_to_index.remove(&entity_id);
-        self.free_index(entity_index);
+        let _ = self.free_index(entity_index);
 
         Ok(())
     }
@@ -85,7 +89,7 @@ impl super::graph::Graph {
     pub fn upsert_policy(&mut self, policy: Policy) -> ArborResult<()> {
         let policy_id = policy.id;
 
-        let (principal_index, resource_index, action_indices, action_set_indices) =
+        let (_principal_index, _resource_index, _action_indices, _action_set_indices) =
             self.validate_policy_relationships(&policy)?;
 
         // Get or create index for the policy
@@ -106,7 +110,7 @@ impl super::graph::Graph {
         let (policy_index, _) = self.verify_policy_existence(policy_id)?;
 
         self.uuid_to_index.remove(&policy_id);
-        self.free_index(policy_index);
+        let _ = self.free_index(policy_index);
         Ok(())
     }
 
@@ -133,7 +137,7 @@ impl super::graph::Graph {
         let (action_index, _) = self.verify_action_existence(action_id)?;
 
         self.uuid_to_index.remove(&action_id);
-        self.free_index(action_index);
+        let _ = self.free_index(action_index);
         Ok(())
     }
 
@@ -156,7 +160,7 @@ impl super::graph::Graph {
     pub fn remove_action_set(&mut self, action_set_id: Uuid) -> ArborResult<()> {
         let (action_set_index, _) = self.verify_action_set_existence(action_set_id)?;
 
-        self.free_index(action_set_index);
+        let _ = self.free_index(action_set_index);
         self.uuid_to_index.remove(&action_set_id);
         Ok(())
     }
@@ -260,7 +264,7 @@ impl super::graph::Graph {
     fn validate_policy_relationships(
         &self,
         policy: &Policy,
-    ) -> ArborResult<(Option<u32>, Option<u32>, Vec<u32>, Vec<u32>)> {
+    ) -> ArborResult<PolicyRelIndices> {
         // Validate principal target
         let principal_index = {
             if let Some(principal_id) = policy.principal.to_uuid() {

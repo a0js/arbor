@@ -1,2 +1,3 @@
 [workspace]
+resolver = "3"
 members = ["crates/arbor-bytecode","crates/arbor-connectors","crates/arbor-graph-core", "crates/arbor-index-snapshot","crates/arbor-proto-internal","crates/arbor-types", "services/arbor-authorizer", "services/arbor-indexer"]

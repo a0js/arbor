@@ -58,6 +58,7 @@ pub struct Policy {
 
 impl Policy {
     /// Create a new policy
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Uuid,
         name: String,
