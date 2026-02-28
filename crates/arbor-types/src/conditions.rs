@@ -71,7 +71,7 @@ pub enum Condition {
 }
 
 impl Condition {
-    pub(crate) fn compute_dependencies(&self) -> Vec<VariableRef> {
+    pub fn compute_dependencies(&self) -> Vec<VariableRef> {
         let mut deps = Vec::new();
         Self::find_condition_dependencies(self, &mut deps);
         deps.sort();

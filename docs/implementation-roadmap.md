@@ -30,15 +30,15 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 - [x] Query helper methods (get_policies_for_*)
 - [x] Specialized bitmaps for optimization
 
-**arbor-bytecode** (stub):
+**arbor-bytecode**:
 - [x] OpCode enum defined in arbor-types
-- [ ] Bytecode VM implementation (stub only)
+- [x] Bytecode VM implementation (complete, 55 tests passing)
 
 **Services** (stubs):
 - [ ] arbor-indexer (basic skeleton)
 - [ ] arbor-authorizer (basic skeleton)
 
-### 🚧 Estimated Completion: 24%
+### 🚧 Estimated Completion: 32%
 
 ## V1: Minimum Viable Product
 
@@ -57,17 +57,18 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 
 ### Phase 1: Core Authorization Engine (4-6 weeks)
 
-#### Week 1-2: Bytecode VM
+#### Week 1-2: Bytecode VM ✅
 
 **Priority**: 🔴 Critical
 
 **Tasks**:
-1. Implement `BytecodeVM` in `arbor-bytecode/src/vm.rs`
-   - [ ] Stack-based interpreter
-   - [ ] Instruction execution for all OpCodes
-   - [ ] EvaluationContext with attribute resolution
-   - [ ] Variable resolution from principal/resource/context
-   - [ ] Error handling (Unknown/Invalid results)
+1. Implement `BytecodeVM` in `arbor-bytecode/src/bytecode_vm.rs`
+   - [x] Stack-based interpreter
+   - [x] Instruction execution for all OpCodes
+   - [x] EvaluationContext with attribute resolution
+   - [x] Variable resolution from principal/resource/context
+   - [x] Missing attribute semantics (Missing sentinel → false at comparisons)
+   - [x] EntityResolver trait for sub-entity hierarchy checks
 
 2. Implement `BytecodeCompiler` in `arbor-bytecode/src/compiler.rs`
    - [ ] Condition AST → bytecode compilation
@@ -75,17 +76,16 @@ This document outlines what needs to be built in Arbor to achieve a production-r
    - [ ] Jump instruction patching for control flow
 
 3. Tests
-   - [ ] Unit tests for each OpCode
-   - [ ] Integration tests (compile + evaluate)
+   - [x] Unit tests for each OpCode (55 tests)
+   - [ ] Integration tests (compile + evaluate end-to-end)
    - [ ] Property-based tests (bytecode ≡ AST evaluation)
 
-**Files to Create**:
-- `crates/arbor-bytecode/src/vm.rs`
-- `crates/arbor-bytecode/src/compiler.rs`
-- `crates/arbor-bytecode/src/context.rs`
-- `crates/arbor-bytecode/tests/vm_tests.rs`
+**Cedar-parity ops added**: `StartsWith`, `EndsWith`, `StringContains`, `Like` (glob),
+`IsType`, `InHierarchy`, `InHierarchyVar`, `ContainsInHierarchy`
 
-**Estimated Lines**: ~1,000
+**Files Created**:
+- `crates/arbor-bytecode/src/bytecode_vm.rs`
+- `crates/arbor-types/src/evaluation.rs` (EntityResolver trait, EvaluationContext)
 
 #### Week 2-3: Snapshot Builder
 
@@ -794,13 +794,12 @@ regex = "1.10"
 ## Next Steps
 
 1. **Immediate (This Week)**
-   - Start bytecode VM implementation
+   - Implement `BytecodeCompiler` (Condition AST → bytecode)
+   - Begin snapshot builder (transitive closure computation)
    - Set up project structure for services
-   - Write first integration test skeleton
 
 2. **Short-Term (Next 2 Weeks)**
-   - Complete bytecode VM
-   - Port snapshot builder logic
+   - Complete snapshot builder
    - Implement check() operation
 
 3. **Medium-Term (Next Month)**

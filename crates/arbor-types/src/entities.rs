@@ -63,6 +63,7 @@ impl Entity {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct IndexedEntity {
     pub attributes: Attributes,
     pub entity_type: EntityTypeId,

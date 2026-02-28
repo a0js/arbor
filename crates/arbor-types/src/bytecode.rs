@@ -87,8 +87,29 @@ pub enum OpCode {
     Jump(u32),
 }
 
+/// A non-fatal issue encountered while compiling a condition.
+///
+/// Warnings do not prevent the condition from being used; the compiler always
+/// produces valid bytecode even when warnings are present. Callers should
+/// surface warnings to policy authors so they can investigate and fix the
+/// underlying cause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompileWarning {
+    /// A hierarchy condition referenced an entity UUID that was not present in
+    /// the snapshot at compile time. The condition compiled to a constant
+    /// `false` for this snapshot; it will evaluate correctly once the entity
+    /// appears in a future snapshot.
+    ///
+    /// Common cause: the policy was written before the referenced entity was
+    /// created, or the entity was deleted.
+    UnresolvedEntityRef(Uuid),
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledCondition {
     pub instructions: Vec<OpCode>,
     pub dependencies: Vec<VariableRef>,
+    /// Non-fatal issues encountered during compilation. Empty when the
+    /// condition compiled without any degradation.
+    pub warnings: Vec<CompileWarning>,
 }
