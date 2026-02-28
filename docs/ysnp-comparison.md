@@ -278,7 +278,7 @@ pub_sub.publish(delta);
 3. **Snapshot Builder**
    - **File**: `ysnp-core/src/store/indexes.rs` (`rebuild_indexes()`)
    - **Lines**: ~500
-   - **Port to**: `arbor-indexer/src/snapshot_builder.rs`
+   - **Port to**: `services/arbor-indexer/src/snapshot_builder.rs`
    - **Changes**: Add bytecode compilation step
 
 4. **Condition Evaluator → Bytecode VM**
@@ -305,7 +305,7 @@ pub_sub.publish(delta);
 
 8. **Transitive Closure Computation**
    - **File**: `ysnp-core/src/store/indexes.rs` (closure algorithms)
-   - **Port to**: `arbor-indexer/src/snapshot_builder.rs`
+   - **Port to**: `services/arbor-indexer/src/snapshot_builder.rs`
    - **Changes**: None, direct port
 
 9. **String Interning**

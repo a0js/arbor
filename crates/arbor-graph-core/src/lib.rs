@@ -1,4 +1,4 @@
-mod types;
-mod mutations;
-mod graph;
+pub mod types;
+pub mod mutations;
+pub mod graph;
 

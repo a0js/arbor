@@ -730,7 +730,7 @@ Transform mutable graph data into optimized, immutable snapshots with precompute
 **Dependencies**: None (uses existing Graph)
 
 ```rust
-// File: crates/arbor-indexer/src/closures.rs
+// File: services/arbor-indexer/src/closures.rs
 
 pub fn compute_ancestors(
     graph: &Graph,
@@ -910,7 +910,7 @@ fn test_multiple_parents() {
 **Dependencies**: Task 2.1, Week 1-2 (Bytecode Compiler)
 
 ```rust
-// File: crates/arbor-indexer/src/snapshot_builder.rs
+// File: services/arbor-indexer/src/snapshot_builder.rs
 
 pub struct SnapshotBuilder {
     graph: Arc<Graph>,
@@ -1279,7 +1279,7 @@ fn test_action_policy_index() {
 Implement configurable batching to control snapshot generation frequency.
 
 ```rust
-// File: crates/arbor-indexer/src/batching.rs
+// File: services/arbor-indexer/src/batching.rs
 
 pub enum BatchStrategy {
     /// Generate snapshot after N changes
@@ -1387,10 +1387,10 @@ fn test_debounced_batching() {
 ### Week 2-3 Deliverables
 
 **Code**:
-- ✅ `crates/arbor-indexer/src/snapshot_builder.rs` (~400 lines)
-- ✅ `crates/arbor-indexer/src/closures.rs` (~300 lines)
-- ✅ `crates/arbor-indexer/src/batching.rs` (~200 lines)
-- ✅ `crates/arbor-indexer/tests/snapshot_tests.rs` (~300 lines)
+- ✅ `services/arbor-indexer/src/snapshot_builder.rs` (~400 lines)
+- ✅ `services/arbor-indexer/src/closures.rs` (~300 lines)
+- ✅ `services/arbor-indexer/src/batching.rs` (~200 lines)
+- ✅ `services/arbor-indexer/tests/snapshot_tests.rs` (~300 lines)
 
 **Total**: ~1,200 lines
 

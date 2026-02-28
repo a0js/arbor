@@ -71,8 +71,8 @@ This document outlines what needs to be built in Arbor to achieve a production-r
    - [x] EntityResolver trait for sub-entity hierarchy checks
 
 2. Implement `BytecodeCompiler` in `arbor-bytecode/src/compiler.rs`
-   - [ ] Condition AST → bytecode compilation
-   - [ ] Optimization (constant folding, dead code elimination)
+   - [x] Condition AST → bytecode compilation
+   - [x] Optimization (constant folding, dead code elimination)
    - [ ] Jump instruction patching for control flow
 
 3. Tests
@@ -93,11 +93,11 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 
 **Tasks**:
 1. Implement transitive closure computation
-   - [ ] `compute_ancestors()` - BFS/DFS to find all ancestors
-   - [ ] `compute_descendants()` - BFS/DFS to find all descendants
-   - [ ] Cycle detection validation
+   - [x] `compute_ancestors()` - BFS/DFS to find all ancestors
+   - [x] `compute_descendants()` - BFS/DFS to find all descendants
+   - [x] Cycle detection validation
 
-2. Implement `SnapshotBuilder` in `arbor-indexer/src/snapshot_builder.rs`
+2. Implement `SnapshotBuilder` in `services/arbor-indexer/src/snapshot_builder.rs`
    - [ ] Build UUID ↔ index mappings
    - [ ] Create IndexedEntity from Entity + closures
    - [ ] Compile conditions to bytecode
@@ -113,15 +113,15 @@ This document outlines what needs to be built in Arbor to achieve a production-r
    - [ ] Snapshot generation throttling
 
 4. Tests
-   - [ ] Closure computation correctness
+   - [x] Closure computation correctness
    - [ ] Snapshot generation from graph
    - [ ] Checksum verification
    - [ ] Batching logic tests
 
 **Files to Create**:
-- `crates/arbor-indexer/src/snapshot_builder.rs`
-- `crates/arbor-indexer/src/closures.rs`
-- `crates/arbor-indexer/tests/snapshot_tests.rs`
+- `services/arbor-indexer/src/snapshot_builder.rs`
+- `services/arbor-indexer/src/closures.rs`
+- `services/arbor-indexer/tests/snapshot_tests.rs`
 
 **Estimated Lines**: ~1,200
 

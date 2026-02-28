@@ -54,6 +54,13 @@ dependencies = [
 [[package]]
 name = "arbor-indexer"
 version = "0.1.0"
+dependencies = [
+ "arbor-graph-core",
+ "arbor-types",
+ "rapidhash",
+ "roaring",
+ "uuid",
+]
 
 [[package]]
 name = "arbor-proto-internal"

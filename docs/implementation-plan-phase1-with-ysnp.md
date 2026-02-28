@@ -91,72 +91,23 @@ cp ../ysnp/ysnp-core/src/engine/condition_evaluator.rs \
 
 ---
 
-### Task 1.2: Port Transitive Closure from YSNP (0.5 days)
+### Task 1.2: Port Transitive Closure from YSNP (0.5 days) ✅
 **Priority**: 🔴 Critical
 **YSNP Source**: `ysnp-core/src/store/core.rs` (lines 146-171)
+**Status**: ✅ Complete
 
-```bash
-# Copy the closure computation
-```
-
-**Modifications Needed**:
-1. Update to use Arbor's Graph structure
-2. Change from HashSet to RoaringBitmap storage
-3. Add cycle detection (safety check)
-4. Update function signatures
-
-**Implementation**:
-```rust
-// File: crates/arbor-indexer/src/closures.rs
-
-// ADAPTED FROM YSNP (ysnp-core/src/store/core.rs:146-171)
-pub fn compute_ancestors(
-    graph: &Graph,
-    entity_uuid: Uuid,
-    parents_map: &HashMap<Uuid, Vec<Uuid>>,
-) -> Result<RoaringBitmap> {
-    let mut ancestors = RoaringBitmap::new();
-    let mut seen = HashSet::new();
-    let mut stack = Vec::new();
-
-    // Get direct parents
-    if let Some(parents) = parents_map.get(&entity_uuid) {
-        stack.extend(parents.iter());
-    }
-
-    // Stack-based DFS (from YSNP)
-    while let Some(parent_uuid) = stack.pop() {
-        if seen.insert(*parent_uuid) {
-            if let Some(&index) = graph.uuid_to_index.get(parent_uuid) {
-                ancestors.insert(index as u32);
-
-                // Add grandparents
-                if let Some(grandparents) = parents_map.get(parent_uuid) {
-                    stack.extend(grandparents.iter());
-                }
-            }
-        }
-    }
-
-    Ok(ancestors)
-}
-
-pub fn compute_descendants(
-    graph: &Graph,
-    entity_uuid: Uuid,
-    children_map: &HashMap<Uuid, Vec<Uuid>>,
-) -> Result<RoaringBitmap> {
-    // Same logic as ancestors but follow children
-    // (from YSNP lines 160-171)
-    // ...
-}
-```
+**Modifications Made**:
+1. Updated to use Arbor's Graph structure
+2. Used RoaringBitmap for storage
+3. Added recursive DFS with cycle detection
+4. Unified ancestor/descendant logic into a single DFS function
+5. Added unit tests for diamond patterns and circular dependencies
 
 **Acceptance Criteria**:
-- [ ] Ancestors computed correctly
-- [ ] Descendants computed correctly
-- [ ] Cycle detection works
-- [ ] Tests pass (port from YSNP)
+- [x] Ancestors computed correctly
+- [x] Descendants computed correctly
+- [x] Cycle detection works
+- [x] Tests pass (port from YSNP)
 
 ---
 
@@ -328,7 +279,7 @@ See original plan for detailed implementation steps.
 
 **Implementation**:
 ```rust
-// File: crates/arbor-indexer/src/snapshot_builder.rs
+// File: services/arbor-indexer/src/snapshot_builder.rs
 
 pub fn build_snapshot(&self) -> Result<Snapshot> {
     // PHASE 1: UUID ↔ Index mappings (from YSNP lines 37-144)
@@ -476,7 +427,7 @@ Follow original plan Task 4.3.
 | YSNP File | Arbor File | Action |
 |-----------|------------|--------|
 | `engine/condition_evaluator.rs` | `arbor-bytecode/src/ast_evaluator.rs` | Copy + adapt |
-| `store/core.rs` (lines 146-171) | `arbor-indexer/src/closures.rs` | Copy + adapt |
+| `store/core.rs` (lines 146-171) | `services/arbor-indexer/src/closures.rs` | Copy + adapt |
 | `engine/check.rs` | `arbor-authorizer/src/check.rs` | Copy + enhance |
 | `engine/listing.rs` | `arbor-authorizer/src/list.rs` | Copy + adapt |
 | `store/index_store/core.rs` | `arbor-index-snapshot/src/lib.rs` | Reference for structure |

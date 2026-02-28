@@ -7,9 +7,6 @@
 // - Start gRPC service
 // - Accept connections
 
-
-
-
 fn main() {
     println!("Hello, world!");
 }
