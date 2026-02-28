@@ -1,6 +1,7 @@
 #![cfg(any(test, feature = "test_utils"))]
 use arbor_types::{Condition, ConditionResult, EvaluationContext, EvaluationError, Operand, AttributeValue, VariableScope, VariableRef};
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use std::net::IpAddr;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ enum Val {
     Bool(bool),
     EntityRef(Uuid),
     IpAddr(IpAddr),
+    IpNetwork(IpNet),
     Set(Vec<AttributeValue>),
     Missing,
 }
@@ -29,6 +31,7 @@ impl From<AttributeValue> for Val {
             AttributeValue::Bool(b) => Val::Bool(b),
             AttributeValue::EntityRef(u) => Val::EntityRef(u),
             AttributeValue::IpAddr(ip) => Val::IpAddr(ip),
+            AttributeValue::IpNetwork(net) => Val::IpNetwork(net),
             AttributeValue::Set(s) => Val::Set(s),
             AttributeValue::Object(_) => Val::Missing,
         }
@@ -374,7 +377,15 @@ fn eval_cond(condition: &Condition, context: &EvaluationContext) -> Result<bool,
             Ok(false)
         }
 
-        Condition::InNetwork(_, _) => Err(EvaluationError::Unimplemented("InNetwork".into())),
+        Condition::InNetwork(ip_op, net_op) => {
+            match (eval_operand(ip_op, context)?, eval_operand(net_op, context)?) {
+                (Val::Missing, _) | (_, Val::Missing) => Ok(false),
+                (Val::IpAddr(ip), Val::IpNetwork(net)) => Ok(net.contains(&ip)),
+                _ => Err(EvaluationError::ExecutionError(
+                    "InNetwork: expected (IpAddr, IpNetwork)".into(),
+                )),
+            }
+        }
     }
 }
 
@@ -386,6 +397,7 @@ fn eval_operand(op: &Operand, context: &EvaluationContext) -> Result<Val, Evalua
         Operand::Bool(b) => Ok(Val::Bool(*b)),
         Operand::Timestamp(t) => Ok(Val::Timestamp(*t)),
         Operand::IpAddr(ip) => Ok(Val::IpAddr(*ip)),
+        Operand::IpNetwork(net) => Ok(Val::IpNetwork(*net)),
         Operand::EntityRef(u) => Ok(Val::EntityRef(*u)),
         Operand::Set(items) => {
             let mut vals = Vec::new();
@@ -399,6 +411,7 @@ fn eval_operand(op: &Operand, context: &EvaluationContext) -> Result<Val, Evalua
                     Val::Bool(b) => vals.push(AttributeValue::Bool(b)),
                     Val::EntityRef(u) => vals.push(AttributeValue::EntityRef(u)),
                     Val::IpAddr(ip) => vals.push(AttributeValue::IpAddr(ip)),
+                    Val::IpNetwork(net) => vals.push(AttributeValue::IpNetwork(net)),
                     Val::Set(s) => vals.push(AttributeValue::Set(s)),
                 }
             }

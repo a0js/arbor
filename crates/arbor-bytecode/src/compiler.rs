@@ -240,11 +240,9 @@ impl<'a> BytecodeCompiler<'a> {
                 self.compile_contains_in_hierarchy(ops, warnings, left, right)?;
             }
 
-            // --- Unsupported ----------------------------------------------------
-            Condition::InNetwork(_, _) => {
-                return Err(CompileError::UnsupportedOperation(
-                    "InNetwork is not supported in V1".into(),
-                ));
+            // --- IP network membership ------------------------------------------
+            Condition::InNetwork(left, right) => {
+                self.compile_in_network(ops, left, right)?;
             }
         }
         Ok(())
@@ -367,6 +365,7 @@ impl<'a> BytecodeCompiler<'a> {
             Operand::Bool(b) => ops.push(OpCode::PushBool(*b)),
             Operand::Timestamp(t) => ops.push(OpCode::PushTimestamp(*t)),
             Operand::IpAddr(ip) => ops.push(OpCode::PushIpAddr(*ip)),
+            Operand::IpNetwork(net) => ops.push(OpCode::PushIpNetwork(*net)),
             Operand::EntityRef(uuid) => ops.push(OpCode::PushEntityRef(*uuid)),
             Operand::Set(items) => {
                 let avs = items
@@ -392,6 +391,7 @@ impl<'a> BytecodeCompiler<'a> {
             Operand::Bool(b) => Ok(AttributeValue::Bool(*b)),
             Operand::Timestamp(t) => Ok(AttributeValue::Timestamp(*t)),
             Operand::IpAddr(ip) => Ok(AttributeValue::IpAddr(*ip)),
+            Operand::IpNetwork(net) => Ok(AttributeValue::IpNetwork(*net)),
             Operand::EntityRef(uuid) => Ok(AttributeValue::EntityRef(*uuid)),
             Operand::Set(items) => {
                 let avs = items
@@ -502,6 +502,30 @@ impl<'a> BytecodeCompiler<'a> {
         Ok(())
     }
 
+    fn compile_in_network(
+        &self,
+        ops: &mut Vec<OpCode>,
+        left: &Operand,
+        right: &Operand,
+    ) -> Result<(), CompileError> {
+        match left {
+            Operand::IpAddr(_) | Operand::Variable(_) => {}
+            _ => return Err(CompileError::InvalidOperand(
+                "InNetwork left operand must be an IpAddr or Variable".into(),
+            )),
+        }
+        match right {
+            Operand::IpNetwork(_) | Operand::Variable(_) => {}
+            _ => return Err(CompileError::InvalidOperand(
+                "InNetwork right operand must be an IpNetwork or Variable".into(),
+            )),
+        }
+        self.compile_operand(ops, left)?;
+        self.compile_operand(ops, right)?;
+        ops.push(OpCode::InNetwork);
+        Ok(())
+    }
+
     /// Extract the UUID from an `Operand::EntityRef`.
     ///
     /// Returns `InvalidOperand` when the operand is not an `EntityRef`.
@@ -524,7 +548,7 @@ mod tests {
     use super::*;
     use arbor_types::{
         AttributeNameId, Condition, CompileWarning, EntityTypeId, IndexedEntity, Operand, OpCode,
-        AttributeValue, VariableRef, VariableScope,
+        VariableRef, VariableScope,
     };
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -727,7 +751,7 @@ mod tests {
             Condition::Eq(scalar_int(2), scalar_int(2)),
             Condition::Eq(scalar_int(3), scalar_int(3)),
         ])).unwrap();
-        let mut expected = vec![
+        let expected = vec![
             // a
             OpCode::PushInteger(1),
             OpCode::PushInteger(1),
@@ -1122,16 +1146,51 @@ mod tests {
         assert!(matches!(err, CompileError::InvalidOperand(_)));
     }
 
-    // ── 11. InNetwork → UnsupportedOperation ────────────────────────────────
+    // ── 11. InNetwork ────────────────────────────────────────────────────────
 
     #[test]
-    fn in_network_unsupported() {
-        let err = compile(&Condition::InNetwork(scalar_str("1.2.3.4"), scalar_str("10.0.0.0/8")))
+    fn in_network_literal_ip_and_network() {
+        use std::net::IpAddr;
+        use ipnet::IpNet;
+        let ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let net: IpNet = "192.168.0.0/16".parse().unwrap();
+        let ops = compile(&Condition::InNetwork(Operand::IpAddr(ip), Operand::IpNetwork(net))).unwrap();
+        assert_eq!(ops, vec![
+            OpCode::PushIpAddr(ip),
+            OpCode::PushIpNetwork(net),
+            OpCode::InNetwork,
+        ]);
+    }
+
+    #[test]
+    fn in_network_variable_operands() {
+        use ipnet::IpNet;
+        let net: IpNet = "10.0.0.0/8".parse().unwrap();
+        let ip_var = Operand::Variable(var(VariableScope::Context, &[attr(1)]));
+        let ops = compile(&Condition::InNetwork(ip_var.clone(), Operand::IpNetwork(net))).unwrap();
+        assert_eq!(ops, vec![
+            OpCode::PushVariable(var(VariableScope::Context, &[attr(1)])),
+            OpCode::PushIpNetwork(net),
+            OpCode::InNetwork,
+        ]);
+    }
+
+    #[test]
+    fn in_network_invalid_left_operand() {
+        use ipnet::IpNet;
+        let net: IpNet = "10.0.0.0/8".parse().unwrap();
+        let err = compile(&Condition::InNetwork(scalar_str("not-an-ip"), Operand::IpNetwork(net)))
             .unwrap_err();
-        assert_eq!(
-            err,
-            CompileError::UnsupportedOperation("InNetwork is not supported in V1".into())
-        );
+        assert!(matches!(err, CompileError::InvalidOperand(_)));
+    }
+
+    #[test]
+    fn in_network_invalid_right_operand() {
+        use std::net::IpAddr;
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        let err = compile(&Condition::InNetwork(Operand::IpAddr(ip), scalar_str("not-a-net")))
+            .unwrap_err();
+        assert!(matches!(err, CompileError::InvalidOperand(_)));
     }
 
     // ── 12. Nested And/Or structure ──────────────────────────────────────────

@@ -1,5 +1,6 @@
 use crate::ids::AttributeNameId;
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use ordered_float::OrderedFloat;
@@ -13,6 +14,7 @@ pub enum AttributeValue {
     Bool(bool),
     Timestamp(DateTime<Utc>),
     IpAddr(IpAddr),
+    IpNetwork(IpNet),
     EntityRef(Uuid),          // Reference to another entity
     Set(Vec<AttributeValue>), // Set of attribute values
     Object(Attributes),       // Nested attributes object

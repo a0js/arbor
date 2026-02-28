@@ -1,3 +1,4 @@
+use ipnet::IpNet;
 use std::net::IpAddr;
 use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
@@ -15,6 +16,7 @@ pub enum OpCode {
     PushString(String),
     PushBool(bool),
     PushIpAddr(IpAddr),
+    PushIpNetwork(IpNet),
     PushEntityRef(Uuid),
     /// Push the value at the given attribute path onto the stack.
     /// Pushes StackValue::Missing if the path does not exist.
@@ -76,6 +78,15 @@ pub enum OpCode {
     /// Wrong attribute type → `Invalid`.
     /// No `EntityResolver` in context → `Invalid`.
     InHierarchyVar(VariableRef, u32),
+
+    /// IP-in-network membership check.
+    ///
+    /// Stack: `[..., IpAddr, IpNetwork]` → `[..., bool]`
+    ///
+    /// Pops right (IpNetwork) then left (IpAddr) and checks whether the address
+    /// is contained in the network. Missing on either operand → false.
+    /// Wrong types → Invalid.
+    InNetwork,
 
     /// Set membership with hierarchy expansion.
     ///

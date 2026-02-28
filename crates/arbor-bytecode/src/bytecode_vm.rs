@@ -25,6 +25,7 @@ use arbor_types::{
     OpCode, VariableRef, VariableScope,
 };
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
 use std::net::IpAddr;
@@ -39,6 +40,7 @@ pub enum StackValue {
     Bool(bool),
     EntityRef(Uuid),
     IpAddr(IpAddr),
+    IpNetwork(IpNet),
     Set(Vec<AttributeValue>),
     Missing,
 }
@@ -198,6 +200,10 @@ impl<'a> BytecodeVM<'a> {
                 self.stack.push(StackValue::IpAddr(*ip));
                 Ok(())
             },
+            OpCode::PushIpNetwork(net) => {
+                self.stack.push(StackValue::IpNetwork(*net));
+                Ok(())
+            },
             OpCode::PushEntityRef(uuid) => {
                 self.stack.push(StackValue::EntityRef(*uuid));
                 Ok(())
@@ -226,6 +232,7 @@ impl<'a> BytecodeVM<'a> {
             OpCode::StringContains => self.execute_string_contains(),
             OpCode::Like => self.execute_like(),
             OpCode::IsType(scope, type_id) => self.execute_is_type(scope, type_id),
+            OpCode::InNetwork => self.execute_in_network(),
             OpCode::InHierarchy(scope, target_idx) => self.execute_in_hierarchy(scope, *target_idx),
             OpCode::InHierarchyVar(var_ref, target_idx) => self.execute_in_hierarchy_var(var_ref, *target_idx),
             OpCode::ContainsInHierarchy(target_idx) => self.execute_contains_in_hierarchy(*target_idx),
@@ -244,6 +251,7 @@ impl<'a> BytecodeVM<'a> {
             Some(AttributeValue::Integer(i)) => StackValue::Integer(i),
             Some(AttributeValue::Bool(b)) => StackValue::Bool(b),
             Some(AttributeValue::IpAddr(ip)) => StackValue::IpAddr(ip),
+            Some(AttributeValue::IpNetwork(net)) => StackValue::IpNetwork(net),
             Some(AttributeValue::Timestamp(t)) => StackValue::Timestamp(t),
             Some(AttributeValue::EntityRef(u)) => StackValue::EntityRef(u),
             Some(AttributeValue::Set(s)) => StackValue::Set(s),
@@ -676,6 +684,32 @@ impl<'a> BytecodeVM<'a> {
         }
 
         self.stack.push(StackValue::Bool(false));
+        Ok(())
+    }
+
+    /// Checks whether an IP address is contained in a network.
+    ///
+    /// Stack: `[..., IpAddr, IpNetwork]` → `[..., Bool]`
+    ///
+    /// Missing on either operand → `false` (attribute absent, no match).
+    /// Wrong types → `Invalid` (compiler bug or bad policy).
+    fn execute_in_network(&mut self) -> Result<(), String> {
+        let right = self.pop()?;
+        let left = self.pop()?;
+        match (left, right) {
+            (StackValue::Missing, _) | (_, StackValue::Missing) => {
+                self.stack.push(StackValue::Bool(false));
+            }
+            (StackValue::IpAddr(ip), StackValue::IpNetwork(net)) => {
+                self.stack.push(StackValue::Bool(net.contains(&ip)));
+            }
+            (l, r) => {
+                return Err(format!(
+                    "InNetwork: expected (IpAddr, IpNetwork), got ({:?}, {:?})",
+                    l, r
+                ));
+            }
+        }
         Ok(())
     }
 

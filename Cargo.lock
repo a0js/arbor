@@ -21,6 +21,7 @@ version = "0.1.0"
 dependencies = [
  "arbor-types",
  "chrono",
+ "ipnet",
  "ordered-float",
  "proptest",
  "roaring",
@@ -73,6 +74,7 @@ name = "arbor-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ipnet",
  "ordered-float",
  "roaring",
  "smallvec",
@@ -223,6 +225,12 @@ checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
 name = "js-sys"

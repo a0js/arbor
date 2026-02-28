@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
@@ -17,6 +18,7 @@ pub enum Operand {
     Bool(bool),
     Timestamp(DateTime<Utc>),
     IpAddr(IpAddr),
+    IpNetwork(IpNet),
     // References and variables
     EntityRef(Uuid),
     Set(Vec<Operand>),
@@ -147,6 +149,7 @@ impl TryFrom<AttributeValue> for Operand {
             AttributeValue::IpAddr(_) => Err(ConversionError(
                 "Cannot convert IpAddr to operand — use InNetwork condition instead".into(),
             )),
+            AttributeValue::IpNetwork(net) => Ok(Operand::IpNetwork(net)),
             AttributeValue::Set(vals) => {
                 let mut operands = Vec::new();
                 for val in vals {

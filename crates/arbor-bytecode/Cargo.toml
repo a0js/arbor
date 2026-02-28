@@ -7,6 +7,7 @@ edition = "2024"
 uuid = { version = "1.18.1", features = ["v4"] }
 arbor-types = { path = "../arbor-types" }
 ordered-float = "5.1.0"
+ipnet = "2.11.0"
 roaring = "0.11.2"
 tracing = "0.1"
 chrono = "0.4.42"
