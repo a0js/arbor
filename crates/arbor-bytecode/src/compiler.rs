@@ -21,7 +21,7 @@
 //! use std::collections::HashMap;
 //! use uuid::Uuid;
 //! use arbor_types::{
-//!     Condition, Operand, ScalarValue, OpCode, EntityResolver, IndexedEntity,
+//!     Condition, Operand, AttributeValue, OpCode, EntityResolver, IndexedEntity,
 //! };
 //! use arbor_bytecode::compiler::{BytecodeCompiler, CompileError};
 //!
@@ -34,8 +34,8 @@
 //! let resolver = NoopResolver;
 //! let compiler = BytecodeCompiler::new(&resolver);
 //! let condition = Condition::Eq(
-//!     Operand::Scalar(ScalarValue::Integer(1)),
-//!     Operand::Scalar(ScalarValue::Integer(1)),
+//!     Operand::Integer(1),
+//!     Operand::Integer(1),
 //! );
 //! let compiled = compiler.compile(&condition).unwrap();
 //! assert_eq!(compiled.instructions.len(), 3); // PushScalar, PushScalar, Eq
@@ -43,7 +43,7 @@
 
 use arbor_types::{
     AttributeValue, Condition, CompiledCondition, CompileWarning, EntityResolver,
-    OpCode, Operand, ScalarValue, VariableRef, VariableScope,
+    OpCode, Operand, VariableRef, VariableScope,
 };
 use uuid::Uuid;
 use tracing::warn;
@@ -95,7 +95,7 @@ impl std::error::Error for CompileError {}
 /// ```rust
 /// use uuid::Uuid;
 /// use arbor_types::{
-///     Condition, Operand, ScalarValue, VariableRef, VariableScope,
+///     Condition, Operand, AttributeValue, VariableRef, VariableScope,
 ///     OpCode, EntityResolver, IndexedEntity,
 /// };
 /// use arbor_bytecode::compiler::BytecodeCompiler;
@@ -111,8 +111,8 @@ impl std::error::Error for CompileError {}
 ///
 /// let condition = Condition::And(vec![
 ///     Condition::Eq(
-///         Operand::Scalar(ScalarValue::Bool(true)),
-///         Operand::Scalar(ScalarValue::Bool(true)),
+///         Operand::Bool(true),
+///         Operand::Bool(true),
 ///     ),
 /// ]);
 /// let compiled = compiler.compile(&condition).unwrap();
@@ -290,20 +290,40 @@ impl<'a> BytecodeCompiler<'a> {
     ) -> Result<(), CompileError> {
         match conds.len() {
             0 => {
-                // Identity element for And is true.
-                ops.push(OpCode::PushScalar(ScalarValue::Bool(true)));
+                ops.push(OpCode::PushBool(true));
             }
             1 => {
                 self.compile_condition(ops, warnings, &conds[0])?;
             }
             _ => {
-                // Compile the first condition, then fold each subsequent one in
-                // with an And opcode: a ∧ b ∧ c → [a] [b] And [c] And
-                self.compile_condition(ops, warnings, &conds[0])?;
-                for cond in &conds[1..] {
+                // Emit each non-last condition with a JumpIfFalse placeholder
+                let mut false_patches = Vec::with_capacity(conds.len() - 1);
+                for cond in &conds[..conds.len() - 1] {
                     self.compile_condition(ops, warnings, cond)?;
-                    ops.push(OpCode::And);
+                    false_patches.push(ops.len());
+                    ops.push(OpCode::JumpIfFalse(0)); // placeholder
                 }
+
+                // Last condition: its result is the final result if all prior were true
+                self.compile_condition(ops, warnings, conds.last().unwrap())?;
+
+                // Jump over the false_label
+                let end_patch = ops.len();
+                ops.push(OpCode::Jump(0)); // placeholder
+
+                // false_label: short-circuit result
+                let false_label = ops.len() as u32;
+                ops.push(OpCode::PushBool(false));
+
+                // end: (index after the PushScalar)
+                let end = ops.len() as u32;
+
+                // Backpatch all JumpIfFalse to false_label
+                for idx in false_patches {
+                    ops[idx] = OpCode::JumpIfFalse(false_label);
+                }
+                // Backpatch the unconditional Jump to end
+                ops[end_patch] = OpCode::Jump(end);
             }
         }
         Ok(())
@@ -317,18 +337,34 @@ impl<'a> BytecodeCompiler<'a> {
     ) -> Result<(), CompileError> {
         match conds.len() {
             0 => {
-                // Identity element for Or is false.
-                ops.push(OpCode::PushScalar(ScalarValue::Bool(false)));
+                ops.push(OpCode::PushBool(false));
             }
             1 => {
                 self.compile_condition(ops, warnings, &conds[0])?;
             }
             _ => {
-                self.compile_condition(ops, warnings, &conds[0])?;
-                for cond in &conds[1..] {
+                let mut true_patches = Vec::with_capacity(conds.len() - 1);
+                for cond in &conds[..conds.len() - 1] {
                     self.compile_condition(ops, warnings, cond)?;
-                    ops.push(OpCode::Or);
+                    true_patches.push(ops.len());
+                    ops.push(OpCode::JumpIfTrue(0)); // placeholder
                 }
+
+                // Last condition — result flows through directly
+                self.compile_condition(ops, warnings, conds.last().unwrap())?;
+
+                let end_patch = ops.len();
+                ops.push(OpCode::Jump(0)); // placeholder
+
+                let true_label = ops.len() as u32;
+                ops.push(OpCode::PushBool(true));
+
+                let end = ops.len() as u32;
+
+                for idx in true_patches {
+                    ops[idx] = OpCode::JumpIfTrue(true_label);
+                }
+                ops[end_patch] = OpCode::Jump(end);
             }
         }
         Ok(())
@@ -355,7 +391,12 @@ impl<'a> BytecodeCompiler<'a> {
         operand: &Operand,
     ) -> Result<(), CompileError> {
         match operand {
-            Operand::Scalar(sv) => ops.push(OpCode::PushScalar(sv.clone())),
+            Operand::String(s) => ops.push(OpCode::PushString(s.clone())),
+            Operand::Integer(i) => ops.push(OpCode::PushInteger(*i)),
+            Operand::Float(f) => ops.push(OpCode::PushFloat(*f)),
+            Operand::Bool(b) => ops.push(OpCode::PushBool(*b)),
+            Operand::Timestamp(t) => ops.push(OpCode::PushTimestamp(*t)),
+            Operand::IpAddr(ip) => ops.push(OpCode::PushIpAddr(*ip)),
             Operand::EntityRef(uuid) => ops.push(OpCode::PushEntityRef(*uuid)),
             Operand::Set(items) => {
                 let avs = items
@@ -375,7 +416,12 @@ impl<'a> BytecodeCompiler<'a> {
     /// mechanism to resolve them there; the compiler rejects them early.
     fn operand_to_av(operand: &Operand) -> Result<AttributeValue, CompileError> {
         match operand {
-            Operand::Scalar(sv) => Ok(AttributeValue::Scalar(sv.clone())),
+            Operand::String(s) => Ok(AttributeValue::String(s.clone())),
+            Operand::Integer(i) => Ok(AttributeValue::Integer(*i)),
+            Operand::Float(f) => Ok(AttributeValue::Float(*f)),
+            Operand::Bool(b) => Ok(AttributeValue::Bool(*b)),
+            Operand::Timestamp(t) => Ok(AttributeValue::Timestamp(*t)),
+            Operand::IpAddr(ip) => Ok(AttributeValue::IpAddr(*ip)),
             Operand::EntityRef(uuid) => Ok(AttributeValue::EntityRef(*uuid)),
             Operand::Set(items) => {
                 let avs = items
@@ -413,7 +459,7 @@ impl<'a> BytecodeCompiler<'a> {
                  correctly once the entity is indexed"
             );
             warnings.push(CompileWarning::UnresolvedEntityRef(uuid));
-            ops.push(OpCode::PushScalar(ScalarValue::Bool(false)));
+            ops.push(OpCode::PushBool(false));
             return Ok(());
         };
 
@@ -466,7 +512,7 @@ impl<'a> BytecodeCompiler<'a> {
                  correctly once the entity is indexed"
             );
             warnings.push(CompileWarning::UnresolvedEntityRef(uuid));
-            ops.push(OpCode::PushScalar(ScalarValue::Bool(false)));
+            ops.push(OpCode::PushBool(false));
             return Ok(());
         };
 
@@ -508,7 +554,7 @@ mod tests {
     use super::*;
     use arbor_types::{
         AttributeNameId, Condition, CompileWarning, EntityTypeId, IndexedEntity, Operand, OpCode,
-        ScalarValue, VariableRef, VariableScope,
+        AttributeValue, VariableRef, VariableScope,
     };
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -581,15 +627,15 @@ mod tests {
     }
 
     fn scalar_int(n: i64) -> Operand {
-        Operand::Scalar(ScalarValue::Integer(n))
+        Operand::Integer(n)
     }
 
     fn scalar_str(s: &str) -> Operand {
-        Operand::Scalar(ScalarValue::String(s.to_owned()))
+        Operand::String(s.to_owned())
     }
 
     fn scalar_bool(b: bool) -> Operand {
-        Operand::Scalar(ScalarValue::Bool(b))
+        Operand::Bool(b)
     }
 
     // ── 1. Simple comparisons ────────────────────────────────────────────────
@@ -598,8 +644,8 @@ mod tests {
     fn eq_scalars() {
         let ops = compile(&Condition::Eq(scalar_int(1), scalar_int(2))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(2)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(2),
             OpCode::Eq,
         ]);
     }
@@ -608,8 +654,8 @@ mod tests {
     fn neq_scalars() {
         let ops = compile(&Condition::Neq(scalar_int(3), scalar_int(4))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(3)),
-            OpCode::PushScalar(ScalarValue::Integer(4)),
+            OpCode::PushInteger(3),
+            OpCode::PushInteger(4),
             OpCode::Neq,
         ]);
     }
@@ -618,8 +664,8 @@ mod tests {
     fn lt_scalars() {
         let ops = compile(&Condition::Lt(scalar_int(1), scalar_int(2))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(2)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(2),
             OpCode::Lt,
         ]);
     }
@@ -628,8 +674,8 @@ mod tests {
     fn lte_scalars() {
         let ops = compile(&Condition::Lte(scalar_int(1), scalar_int(2))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(2)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(2),
             OpCode::Lte,
         ]);
     }
@@ -638,8 +684,8 @@ mod tests {
     fn gt_scalars() {
         let ops = compile(&Condition::Gt(scalar_int(5), scalar_int(3))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(5)),
-            OpCode::PushScalar(ScalarValue::Integer(3)),
+            OpCode::PushInteger(5),
+            OpCode::PushInteger(3),
             OpCode::Gt,
         ]);
     }
@@ -648,8 +694,8 @@ mod tests {
     fn gte_scalars() {
         let ops = compile(&Condition::Gte(scalar_int(5), scalar_int(5))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(5)),
-            OpCode::PushScalar(ScalarValue::Integer(5)),
+            OpCode::PushInteger(5),
+            OpCode::PushInteger(5),
             OpCode::Gte,
         ]);
     }
@@ -660,7 +706,7 @@ mod tests {
         let ops = compile(&Condition::Eq(var_op.clone(), scalar_int(42))).unwrap();
         assert_eq!(ops, vec![
             OpCode::PushVariable(var(VariableScope::Principal, &[attr(1)])),
-            OpCode::PushScalar(ScalarValue::Integer(42)),
+            OpCode::PushInteger(42),
             OpCode::Eq,
         ]);
     }
@@ -670,13 +716,13 @@ mod tests {
     #[test]
     fn and_empty() {
         let ops = compile(&Condition::And(vec![])).unwrap();
-        assert_eq!(ops, vec![OpCode::PushScalar(ScalarValue::Bool(true))]);
+        assert_eq!(ops, vec![OpCode::PushBool(true)]);
     }
 
     #[test]
     fn or_empty() {
         let ops = compile(&Condition::Or(vec![])).unwrap();
-        assert_eq!(ops, vec![OpCode::PushScalar(ScalarValue::Bool(false))]);
+        assert_eq!(ops, vec![OpCode::PushBool(false)]);
     }
 
     #[test]
@@ -686,8 +732,8 @@ mod tests {
         ])).unwrap();
         // Single element — no And opcode emitted.
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(1)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(1),
             OpCode::Eq,
         ]);
     }
@@ -698,8 +744,8 @@ mod tests {
             Condition::Eq(scalar_bool(true), scalar_bool(true)),
         ])).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Bool(true)),
-            OpCode::PushScalar(ScalarValue::Bool(true)),
+            OpCode::PushBool(true),
+            OpCode::PushBool(true),
             OpCode::Eq,
         ]);
     }
@@ -711,22 +757,26 @@ mod tests {
             Condition::Eq(scalar_int(2), scalar_int(2)),
             Condition::Eq(scalar_int(3), scalar_int(3)),
         ])).unwrap();
-        assert_eq!(ops, vec![
+        let mut expected = vec![
             // a
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(1)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(1),
             OpCode::Eq,
+            OpCode::JumpIfFalse(12),
             // b
-            OpCode::PushScalar(ScalarValue::Integer(2)),
-            OpCode::PushScalar(ScalarValue::Integer(2)),
+            OpCode::PushInteger(2),
+            OpCode::PushInteger(2),
             OpCode::Eq,
-            OpCode::And,
+            OpCode::JumpIfFalse(12),
             // c
-            OpCode::PushScalar(ScalarValue::Integer(3)),
-            OpCode::PushScalar(ScalarValue::Integer(3)),
+            OpCode::PushInteger(3),
+            OpCode::PushInteger(3),
             OpCode::Eq,
-            OpCode::And,
-        ]);
+            OpCode::Jump(13),
+            // false label
+            OpCode::PushBool(false),
+        ];
+        assert_eq!(ops, expected);
     }
 
     #[test]
@@ -736,13 +786,15 @@ mod tests {
             Condition::Eq(scalar_bool(false), scalar_bool(true)),
         ])).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Bool(true)),
-            OpCode::PushScalar(ScalarValue::Bool(false)),
+            OpCode::PushBool(true),
+            OpCode::PushBool(false),
             OpCode::Eq,
-            OpCode::PushScalar(ScalarValue::Bool(false)),
-            OpCode::PushScalar(ScalarValue::Bool(true)),
+            OpCode::JumpIfTrue(8),
+            OpCode::PushBool(false),
+            OpCode::PushBool(true),
             OpCode::Eq,
-            OpCode::Or,
+            OpCode::Jump(9),
+            OpCode::PushBool(true),
         ]);
     }
 
@@ -753,8 +805,8 @@ mod tests {
             scalar_bool(false),
         )))).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Bool(true)),
-            OpCode::PushScalar(ScalarValue::Bool(false)),
+            OpCode::PushBool(true),
+            OpCode::PushBool(false),
             OpCode::Eq,
             OpCode::Not,
         ]);
@@ -767,7 +819,7 @@ mod tests {
         let set = Operand::Set(vec![scalar_int(1), scalar_int(2)]);
         let ops = compile(&Condition::In(scalar_int(1), set)).unwrap();
         // VM execute_in: stack [element, set] — pops set first, then element.
-        assert_eq!(ops[0], OpCode::PushScalar(ScalarValue::Integer(1)));
+        assert_eq!(ops[0], OpCode::PushInteger(1));
         assert!(matches!(ops[1], OpCode::PushSet(_)));
         assert_eq!(ops[2], OpCode::In);
     }
@@ -778,7 +830,7 @@ mod tests {
         let ops = compile(&Condition::Contains(set, scalar_int(10))).unwrap();
         // VM execute_contains: stack [set, element] — pops element first, then set.
         assert!(matches!(ops[0], OpCode::PushSet(_)));
-        assert_eq!(ops[1], OpCode::PushScalar(ScalarValue::Integer(10)));
+        assert_eq!(ops[1], OpCode::PushInteger(10));
         assert_eq!(ops[2], OpCode::Contains);
     }
 
@@ -811,8 +863,8 @@ mod tests {
             scalar_str("hello"),
         )).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("hello".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("hello".into()),
             OpCode::StartsWith,
         ]);
     }
@@ -824,8 +876,8 @@ mod tests {
             scalar_str("world"),
         )).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("world".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("world".into()),
             OpCode::EndsWith,
         ]);
     }
@@ -837,8 +889,8 @@ mod tests {
             scalar_str("lo wo"),
         )).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("lo wo".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("lo wo".into()),
             OpCode::StringContains,
         ]);
     }
@@ -850,8 +902,8 @@ mod tests {
             scalar_str("hello*"),
         )).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("hello*".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("hello*".into()),
             OpCode::Like,
         ]);
     }
@@ -971,7 +1023,7 @@ mod tests {
             Operand::EntityRef(unknown_uuid),
         );
         let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::PushScalar(ScalarValue::Bool(false))]);
+        assert_eq!(ops, vec![OpCode::PushBool(false)]);
     }
 
     #[test]
@@ -1058,7 +1110,7 @@ mod tests {
             Operand::EntityRef(unknown),
         );
         let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::PushScalar(ScalarValue::Bool(false))]);
+        assert_eq!(ops, vec![OpCode::PushBool(false)]);
     }
 
     #[test]
@@ -1125,24 +1177,34 @@ mod tests {
 
         let ops = compile(&outer_and).unwrap();
 
-        // Expected sequence:
-        // PushScalar(1), PushScalar(1), Eq,   ← a == 1
-        // PushScalar(2), PushScalar(2), Eq,   ← b == 2
-        // Or,                                  ← (a==1 || b==2)
-        // PushScalar(3), PushScalar(3), Eq,   ← c == 3
-        // And                                  ← outer &&
+        // Expected sequence with short-circuiting:
+        // Or:
+        //   PushScalar(1), PushScalar(1), Eq,
+        //   JumpIfTrue(8)
+        //   PushScalar(2), PushScalar(2), Eq,
+        //   Jump(9)
+        //   PushScalar(ScalarValue::Bool(true))
+        // And:
+        //   JumpIfFalse(14)
+        //   PushScalar(3), PushScalar(3), Eq,
+        //   Jump(15)
+        //   PushScalar(ScalarValue::Bool(false))
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(1)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(1),
             OpCode::Eq,
-            OpCode::PushScalar(ScalarValue::Integer(2)),
-            OpCode::PushScalar(ScalarValue::Integer(2)),
+            OpCode::JumpIfTrue(8),
+            OpCode::PushInteger(2),
+            OpCode::PushInteger(2),
             OpCode::Eq,
-            OpCode::Or,
-            OpCode::PushScalar(ScalarValue::Integer(3)),
-            OpCode::PushScalar(ScalarValue::Integer(3)),
+            OpCode::Jump(9),
+            OpCode::PushBool(true),
+            OpCode::JumpIfFalse(14),
+            OpCode::PushInteger(3),
+            OpCode::PushInteger(3),
             OpCode::Eq,
-            OpCode::And,
+            OpCode::Jump(15),
+            OpCode::PushBool(false),
         ]);
     }
 
@@ -1153,8 +1215,8 @@ mod tests {
         let double_not = Condition::Not(Box::new(Condition::Not(Box::new(inner))));
         let ops = compile(&double_not).unwrap();
         assert_eq!(ops, vec![
-            OpCode::PushScalar(ScalarValue::Integer(1)),
-            OpCode::PushScalar(ScalarValue::Integer(1)),
+            OpCode::PushInteger(1),
+            OpCode::PushInteger(1),
             OpCode::Eq,
             OpCode::Not,
             OpCode::Not,
@@ -1221,7 +1283,7 @@ mod tests {
     fn bare_scalar_operand() {
         let cond = Condition::Operand(scalar_int(99));
         let ops = compile(&cond).unwrap();
-        assert_eq!(ops, vec![OpCode::PushScalar(ScalarValue::Integer(99))]);
+        assert_eq!(ops, vec![OpCode::PushInteger(99)]);
     }
 
     #[test]
@@ -1236,7 +1298,7 @@ mod tests {
     fn set_literal_with_variable_is_error() {
         // Variables inside set literals must be rejected.
         let bad_set = Operand::Set(vec![
-            Operand::Scalar(ScalarValue::Integer(1)),
+            Operand::Integer(1),
             Operand::Variable(var(VariableScope::Principal, &[attr(1)])),
         ]);
         let err = compile(&Condition::Operand(bad_set)).unwrap_err();
@@ -1286,14 +1348,16 @@ mod tests {
 
         let compiled = compile_full(&cond, &resolver).unwrap();
 
-        // Instructions: PushVariable, PushScalar, Eq, InHierarchy(bare), And
+        // Instructions: PushVariable, PushScalar, Eq, JumpIfFalse(6), InHierarchy(bare), Jump(7), PushScalar(Bool(false))
         assert_eq!(compiled.instructions, vec![
             OpCode::PushVariable(v_principal.clone()),
-            OpCode::PushScalar(ScalarValue::String("alice".into())),
+            OpCode::PushString("alice".into()),
             OpCode::Eq,
+            OpCode::JumpIfFalse(6),
             // Root-scope resource with empty path → InHierarchy (no PushVariable).
             OpCode::InHierarchy(VariableScope::Resource, 0),
-            OpCode::And,
+            OpCode::Jump(7),
+            OpCode::PushBool(false),
         ]);
 
         // v_principal is a dependency; v_resource_root has empty path and is

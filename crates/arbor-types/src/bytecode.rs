@@ -1,12 +1,20 @@
+use std::net::IpAddr;
+use chrono::{DateTime, Utc};
+use ordered_float::OrderedFloat;
 use uuid::Uuid;
-use crate::attributes::{AttributeValue, ScalarValue};
+use crate::attributes::AttributeValue;
 use crate::conditions::{VariableRef, VariableScope};
 use crate::ids::EntityTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpCode {
     // Stack manipulation
-    PushScalar(ScalarValue),
+    PushInteger(i64),
+    PushFloat(OrderedFloat<f64>),
+    PushTimestamp(DateTime<Utc>),
+    PushString(String),
+    PushBool(bool),
+    PushIpAddr(IpAddr),
     PushEntityRef(Uuid),
     /// Push the value at the given attribute path onto the stack.
     /// Pushes StackValue::Missing if the path does not exist.
@@ -84,6 +92,7 @@ pub enum OpCode {
 
     // Control flow (not yet implemented)
     JumpIfFalse(u32),
+    JumpIfTrue(u32),
     Jump(u32),
 }
 

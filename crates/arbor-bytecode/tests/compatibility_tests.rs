@@ -1,6 +1,6 @@
 use arbor_types::{
     AttributeValue, Condition, EntityResolver, IndexedEntity,
-    Operand, ScalarValue, VariableRef, VariableScope, AttributeNameId,
+    Operand, VariableRef, VariableScope, AttributeNameId,
     EvaluationContext, ConditionResult, Attributes, EntityTypeId,
 };
 use arbor_bytecode::compiler::BytecodeCompiler;
@@ -60,8 +60,8 @@ fn test_compiler_vm_compatibility() {
 
     // Test 1: Simple Equality
     let cond_eq = Condition::Eq(
-        Operand::Scalar(ScalarValue::Integer(10)),
-        Operand::Scalar(ScalarValue::Integer(10)),
+        Operand::Integer(10),
+        Operand::Integer(10),
     );
     let compiled = compiler.compile(&cond_eq).expect("Failed to compile Eq");
     
@@ -74,11 +74,11 @@ fn test_compiler_vm_compatibility() {
     // principal.age == 30
     let age_attr = AttributeNameId::new(1);
     let mut principal_with_age = user_entity.clone();
-    principal_with_age.attributes.set(age_attr, AttributeValue::Scalar(ScalarValue::Integer(30)));
+    principal_with_age.attributes.set(age_attr,  AttributeValue::Integer(30 ));
     
     let cond_var = Condition::Eq(
         Operand::Variable(VariableRef { scope: VariableScope::Principal, path: vec![age_attr] }),
-        Operand::Scalar(ScalarValue::Integer(30)),
+        Operand::Integer(30),
     );
     let compiled_var = compiler.compile(&cond_var).expect("Failed to compile Var Eq");
     
@@ -112,10 +112,10 @@ fn test_compiler_vm_compatibility() {
 
     // Test 5: In (Set)
     let cond_set_in = Condition::In(
-        Operand::Scalar(ScalarValue::Integer(1)),
+        Operand::Integer(1),
         Operand::Set(vec![
-            Operand::Scalar(ScalarValue::Integer(1)),
-            Operand::Scalar(ScalarValue::Integer(2)),
+            Operand::Integer(1),
+            Operand::Integer(2),
         ]),
     );
     let compiled_set_in = compiler.compile(&cond_set_in).expect("Failed to compile In Set");
@@ -126,10 +126,10 @@ fn test_compiler_vm_compatibility() {
     // Test 6: Contains (Set)
     let cond_set_contains = Condition::Contains(
         Operand::Set(vec![
-            Operand::Scalar(ScalarValue::Integer(1)),
-            Operand::Scalar(ScalarValue::Integer(2)),
+            Operand::Integer(1),
+            Operand::Integer(2),
         ]),
-        Operand::Scalar(ScalarValue::Integer(2)),
+        Operand::Integer(2),
     );
     let compiled_set_contains = compiler.compile(&cond_set_contains).expect("Failed to compile Contains Set");
     let mut vm_set_contains = BytecodeVM::new(&context);
@@ -138,8 +138,8 @@ fn test_compiler_vm_compatibility() {
 
     // Test 7: String operations
     let cond_starts_with = Condition::StartsWith(
-        Operand::Scalar(ScalarValue::String("hello world".into())),
-        Operand::Scalar(ScalarValue::String("hello".into())),
+        Operand::String("hello world".into()),
+        Operand::String("hello".into()),
     );
     let compiled_starts_with = compiler.compile(&cond_starts_with).expect("Failed to compile StartsWith");
     let mut vm_starts_with = BytecodeVM::new(&context);
@@ -148,8 +148,8 @@ fn test_compiler_vm_compatibility() {
 
     // Test 8: Not
     let cond_not = Condition::Not(Box::new(Condition::Eq(
-        Operand::Scalar(ScalarValue::Integer(1)),
-        Operand::Scalar(ScalarValue::Integer(2)),
+        Operand::Integer(1),
+        Operand::Integer(2),
     )));
     let compiled_not = compiler.compile(&cond_not).expect("Failed to compile Not");
     let mut vm_not = BytecodeVM::new(&context);

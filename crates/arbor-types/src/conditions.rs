@@ -1,6 +1,9 @@
+use std::net::IpAddr;
+use chrono::{DateTime, Utc};
+use ordered_float::OrderedFloat;
 use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
-use crate::attributes::{AttributeValue, ScalarValue};
+use crate::attributes::AttributeValue;
 use crate::ids::{AttributeNameId, EntityTypeId};
 use uuid::Uuid;
 
@@ -8,7 +11,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
     // Literal values
-    Scalar(ScalarValue),
+    String(String),
+    Integer(i64),
+    Float(OrderedFloat<f64>),
+    Bool(bool),
+    Timestamp(DateTime<Utc>),
+    IpAddr(IpAddr),
     // References and variables
     EntityRef(Uuid),
     Set(Vec<Operand>),
@@ -130,8 +138,15 @@ impl TryFrom<AttributeValue> for Operand {
 
     fn try_from(av: AttributeValue) -> Result<Self, Self::Error> {
         match av {
-            AttributeValue::Scalar(sv) => Ok(Operand::Scalar(sv)),
+            AttributeValue::String(s) => Ok(Operand::String(s)),
+            AttributeValue::Integer(i) => Ok(Operand::Integer(i)),
+            AttributeValue::Float(f) => Ok(Operand::Float(f)),
+            AttributeValue::Bool(b) => Ok(Operand::Bool(b)),
+            AttributeValue::Timestamp(t) => Ok(Operand::Timestamp(t)),
             AttributeValue::EntityRef(eid) => Ok(Operand::EntityRef(eid)),
+            AttributeValue::IpAddr(_) => Err(ConversionError(
+                "Cannot convert IpAddr to operand — use InNetwork condition instead".into(),
+            )),
             AttributeValue::Set(vals) => {
                 let mut operands = Vec::new();
                 for val in vals {
@@ -143,11 +158,5 @@ impl TryFrom<AttributeValue> for Operand {
                 "Cannot convert nested object to operand".into(),
             )),
         }
-    }
-}
-
-impl From<ScalarValue> for Operand {
-    fn from(sv: ScalarValue) -> Self {
-        Operand::Scalar(sv)
     }
 }

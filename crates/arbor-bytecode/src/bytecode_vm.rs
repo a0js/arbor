@@ -22,21 +22,24 @@
 
 use arbor_types::{
     AttributeValue, ConditionResult, EntityTypeId, EvaluationContext, EvaluationError,
-    OpCode, ScalarValue, VariableRef, VariableScope,
+    OpCode, VariableRef, VariableScope,
 };
+use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
+use std::net::IpAddr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
-enum StackValue {
-    Scalar(ScalarValue),
-    EntityRef(Uuid),
-    /// Set of attribute values (kept as AttributeValue to avoid conversion overhead).
-    Set(Vec<AttributeValue>),
+pub enum StackValue {
+    Integer(i64),
+    Float(OrderedFloat<f64>),
+    Timestamp(DateTime<Utc>),
+    String(String),
     Bool(bool),
-    /// A variable path that resolved to nothing. Inert in comparisons (→ false).
-    /// Must not reach logical operators — that is a compiler bug.
+    EntityRef(Uuid),
+    IpAddr(IpAddr),
+    Set(Vec<AttributeValue>),
     Missing,
 }
 
@@ -61,15 +64,94 @@ impl<'a> BytecodeVM<'a> {
     /// at comparison boundaries; they are not errors.
     pub fn evaluate(&mut self, instructions: &[OpCode]) -> ConditionResult {
         self.stack.clear();
+        let mut pc: usize = 0;
 
-        for (pc, instruction) in instructions.iter().enumerate() {
-            if let Err(e) = self.execute_instruction(instruction) {
-                return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
-                    format!("pc={}: {}", pc, e),
-                )]);
+        while pc < instructions.len() {
+            match &instructions[pc] {
+                OpCode::Jump(target) => {
+                    let target = *target as usize;
+                    if target > instructions.len() {
+                        return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                            format!("pc={}: Jump target {} out of bounds (len={})", pc, target, instructions.len()),
+                        )]);
+                    }
+                    pc = target;
+                    continue; // don't increment pc
+                }
+                OpCode::JumpIfFalse(target) => {
+                    let target_usize = *target as usize;
+                    if target_usize > instructions.len() {
+                        return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                            format!("pc={}: JumpIfFalse target {} out of bounds", pc, target_usize),
+                        )]);
+                    }
+                    match self.pop() {
+                        Ok(StackValue::Bool(false)) => {
+                            pc = target_usize;
+                            continue; // jump taken
+                        }
+                        Ok(StackValue::Bool(true)) => {
+                            // fall through, pc will increment below
+                        }
+                        Ok(StackValue::Missing) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: compiler bug: Missing reached JumpIfFalse", pc),
+                            )]);
+                        }
+                        Ok(other) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: JumpIfFalse requires Bool, got {:?}", pc, other),
+                            )]);
+                        }
+                        Err(e) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: {}", pc, e),
+                            )]);
+                        }
+                    }
+                }
+                OpCode::JumpIfTrue(target) => {
+                    let target_usize = *target as usize;
+                    if target_usize > instructions.len() {
+                        return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                            format!("pc={}: JumpIfTrue target {} out of bounds", pc, target_usize),
+                        )]);
+                    }
+                    match self.pop() {
+                        Ok(StackValue::Bool(true)) => {
+                            pc = target_usize;
+                            continue;
+                        }
+                        Ok(StackValue::Bool(false)) => { /* fall through */ }
+                        Ok(StackValue::Missing) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: compiler bug: Missing reached JumpIfTrue", pc),
+                            )]);
+                        }
+                        Ok(other) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: JumpIfTrue requires Bool, got {:?}", pc, other),
+                            )]);
+                        }
+                        Err(e) => {
+                            return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                                format!("pc={}: {}", pc, e),
+                            )]);
+                        }
+                    }
+                }
+                other => {
+                    if let Err(e) = self.execute_instruction(other) {
+                        return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
+                            format!("pc={}: {}", pc, e),
+                        )]);
+                    }
+                }
             }
+            pc += 1;
         }
 
+        // Final stack check (unchanged)
         if self.stack.len() != 1 {
             return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(format!(
                 "invalid final stack: {} values (expected 1)",
@@ -89,12 +171,33 @@ impl<'a> BytecodeVM<'a> {
         }
     }
 
+
     fn execute_instruction(&mut self, instruction: &OpCode) -> Result<(), String> {
         match instruction {
-            OpCode::PushScalar(val) => {
-                self.stack.push(StackValue::Scalar(val.clone()));
+            OpCode::PushInteger(i) => {
+                self.stack.push(StackValue::Integer(*i));
+                Ok(())
+            },
+            OpCode::PushFloat(f) => {
+                self.stack.push(StackValue::Float(*f));
+                Ok(())
+            },
+            OpCode::PushTimestamp(t) => {
+                self.stack.push(StackValue::Timestamp(*t));
+                Ok(())
+            },
+            OpCode::PushString(s) => {
+                self.stack.push(StackValue::String(s.clone()));
+                Ok(())
+            },
+            OpCode::PushBool(b) => {
+                self.stack.push(StackValue::Bool(*b));
                 Ok(())
             }
+            OpCode::PushIpAddr(ip) => {
+                self.stack.push(StackValue::IpAddr(*ip));
+                Ok(())
+            },
             OpCode::PushEntityRef(uuid) => {
                 self.stack.push(StackValue::EntityRef(*uuid));
                 Ok(())
@@ -126,8 +229,8 @@ impl<'a> BytecodeVM<'a> {
             OpCode::InHierarchy(scope, target_idx) => self.execute_in_hierarchy(scope, *target_idx),
             OpCode::InHierarchyVar(var_ref, target_idx) => self.execute_in_hierarchy_var(var_ref, *target_idx),
             OpCode::ContainsInHierarchy(target_idx) => self.execute_contains_in_hierarchy(*target_idx),
-            OpCode::JumpIfFalse(_) | OpCode::Jump(_) => {
-                Err("control flow not yet implemented".into())
+            OpCode::JumpIfFalse(_) | OpCode::Jump(_) | OpCode::JumpIfTrue(_) => {
+                Err("control flow shouldn't evaluate here".into())
             }
         }
     }
@@ -136,7 +239,12 @@ impl<'a> BytecodeVM<'a> {
 
     fn execute_push_variable(&mut self, var_ref: &VariableRef) -> Result<(), String> {
         let value = match self.resolve_variable(var_ref) {
-            Some(AttributeValue::Scalar(s)) => StackValue::Scalar(s),
+            Some(AttributeValue::String(s)) => StackValue::String(s),
+            Some(AttributeValue::Float(f)) => StackValue::Float(f),
+            Some(AttributeValue::Integer(i)) => StackValue::Integer(i),
+            Some(AttributeValue::Bool(b)) => StackValue::Bool(b),
+            Some(AttributeValue::IpAddr(ip)) => StackValue::IpAddr(ip),
+            Some(AttributeValue::Timestamp(t)) => StackValue::Timestamp(t),
             Some(AttributeValue::EntityRef(u)) => StackValue::EntityRef(u),
             Some(AttributeValue::Set(s)) => StackValue::Set(s),
             // Objects cannot be directly compared; treat as Missing.
@@ -172,9 +280,17 @@ impl<'a> BytecodeVM<'a> {
         let left = self.pop()?;
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => Self::scalar_eq(l, r),
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                Self::stack_scalar_eq(&left, &right)
+            }
             (StackValue::EntityRef(l), StackValue::EntityRef(r)) => l == r,
             (StackValue::Bool(l), StackValue::Bool(r)) => l == r,
+            (StackValue::IpAddr(l), StackValue::IpAddr(r)) => l == r,
             _ => return Err(format!("type mismatch in ==: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -188,9 +304,17 @@ impl<'a> BytecodeVM<'a> {
         // then NOT false → true, which would be an authorization bypass.
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => !Self::scalar_eq(l, r),
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                !Self::stack_scalar_eq(&left, &right)
+            }
             (StackValue::EntityRef(l), StackValue::EntityRef(r)) => l != r,
             (StackValue::Bool(l), StackValue::Bool(r)) => l != r,
+            (StackValue::IpAddr(l), StackValue::IpAddr(r)) => l != r,
             _ => return Err(format!("type mismatch in !=: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -202,7 +326,14 @@ impl<'a> BytecodeVM<'a> {
         let left = self.pop()?;
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => Self::scalar_cmp(l, r)? == Ordering::Less,
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                Self::stack_scalar_cmp(&left, &right)? == Ordering::Less
+            }
             _ => return Err(format!("type mismatch in <: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -214,7 +345,14 @@ impl<'a> BytecodeVM<'a> {
         let left = self.pop()?;
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => Self::scalar_cmp(l, r)? != Ordering::Greater,
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                Self::stack_scalar_cmp(&left, &right)? != Ordering::Greater
+            }
             _ => return Err(format!("type mismatch in <=: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -226,7 +364,14 @@ impl<'a> BytecodeVM<'a> {
         let left = self.pop()?;
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => Self::scalar_cmp(l, r)? == Ordering::Greater,
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                Self::stack_scalar_cmp(&left, &right)? == Ordering::Greater
+            }
             _ => return Err(format!("type mismatch in >: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -238,7 +383,14 @@ impl<'a> BytecodeVM<'a> {
         let left = self.pop()?;
         let result = match (&left, &right) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(l), StackValue::Scalar(r)) => Self::scalar_cmp(l, r)? != Ordering::Less,
+            (StackValue::Integer(_), StackValue::Integer(_))
+            | (StackValue::Integer(_), StackValue::Float(_))
+            | (StackValue::Float(_), StackValue::Integer(_))
+            | (StackValue::Float(_), StackValue::Float(_))
+            | (StackValue::String(_), StackValue::String(_))
+            | (StackValue::Timestamp(_), StackValue::Timestamp(_)) => {
+                Self::stack_scalar_cmp(&left, &right)? != Ordering::Less
+            }
             _ => return Err(format!("type mismatch in >=: {:?} vs {:?}", left, right)),
         };
         self.stack.push(StackValue::Bool(result));
@@ -303,15 +455,9 @@ impl<'a> BytecodeVM<'a> {
         let element = self.pop()?;
         let result = match (element, set) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(elem), StackValue::Set(set_vals)) => set_vals
+            (elem, StackValue::Set(set_vals)) => set_vals
                 .iter()
-                .any(|v| match v {
-                    AttributeValue::Scalar(s) => Self::scalar_eq(s, &elem),
-                    _ => false,
-                }),
-            (StackValue::EntityRef(elem), StackValue::Set(set_vals)) => set_vals
-                .iter()
-                .any(|v| matches!(v, AttributeValue::EntityRef(e) if e == &elem)),
+                .any(|v| Self::stack_val_attribute_val_eq(&elem, v)),
             _ => return Err("In requires (element, set)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -325,15 +471,9 @@ impl<'a> BytecodeVM<'a> {
         let set = self.pop()?;
         let result = match (set, element) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Set(set_vals), StackValue::Scalar(elem)) => set_vals
+            (StackValue::Set(set_vals), elem) => set_vals
                 .iter()
-                .any(|v| match v {
-                    AttributeValue::Scalar(s) => Self::scalar_eq(s, &elem),
-                    _ => false,
-                }),
-            (StackValue::Set(set_vals), StackValue::EntityRef(elem)) => set_vals
-                .iter()
-                .any(|v| matches!(v, AttributeValue::EntityRef(e) if e == &elem)),
+                .any(|v| Self::stack_val_attribute_val_eq(&elem, v)),
             _ => return Err("Contains requires (set, element)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -376,9 +516,7 @@ impl<'a> BytecodeVM<'a> {
         let string = self.pop()?;
         let result = match (string, prefix) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(ScalarValue::String(s)), StackValue::Scalar(ScalarValue::String(p))) => {
-                s.starts_with(p.as_str())
-            }
+            (StackValue::String(s), StackValue::String(p)) => s.starts_with(p.as_str()),
             _ => return Err("StartsWith requires (string, string)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -391,9 +529,7 @@ impl<'a> BytecodeVM<'a> {
         let string = self.pop()?;
         let result = match (string, suffix) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(ScalarValue::String(s)), StackValue::Scalar(ScalarValue::String(p))) => {
-                s.ends_with(p.as_str())
-            }
+            (StackValue::String(s), StackValue::String(p)) => s.ends_with(p.as_str()),
             _ => return Err("EndsWith requires (string, string)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -406,9 +542,7 @@ impl<'a> BytecodeVM<'a> {
         let haystack = self.pop()?;
         let result = match (haystack, needle) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(ScalarValue::String(s)), StackValue::Scalar(ScalarValue::String(n))) => {
-                s.contains(n.as_str())
-            }
+            (StackValue::String(s), StackValue::String(n)) => s.contains(n.as_str()),
             _ => return Err("StringContains requires (string, string)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -424,9 +558,7 @@ impl<'a> BytecodeVM<'a> {
         let string = self.pop()?;
         let result = match (string, pattern) {
             (StackValue::Missing, _) | (_, StackValue::Missing) => false,
-            (StackValue::Scalar(ScalarValue::String(s)), StackValue::Scalar(ScalarValue::String(p))) => {
-                Self::glob_match(&s, &p)
-            }
+            (StackValue::String(s), StackValue::String(p)) => Self::glob_match(&s, &p),
             _ => return Err("Like requires (string, pattern)".into()),
         };
         self.stack.push(StackValue::Bool(result));
@@ -566,35 +698,52 @@ impl<'a> BytecodeVM<'a> {
     /// Note: `i64 as f64` is lossy above 2^53. Integers outside ±2^53 compared
     /// against float literals may produce incorrect results. This is a known
     /// limitation; schema validation should constrain value ranges where precision matters.
-    fn scalar_eq(a: &ScalarValue, b: &ScalarValue) -> bool {
+    fn scalar_eq(a: &AttributeValue, b: &AttributeValue) -> bool {
         match (a, b) {
-            (ScalarValue::Integer(ai), ScalarValue::Integer(bi)) => ai == bi,
-            (ScalarValue::Float(af), ScalarValue::Float(bf)) => af == bf,
-            (ScalarValue::Integer(ai), ScalarValue::Float(bf)) => OrderedFloat(*ai as f64) == *bf,
-            (ScalarValue::Float(af), ScalarValue::Integer(bi)) => *af == OrderedFloat(*bi as f64),
-            (ScalarValue::String(a), ScalarValue::String(b)) => a == b,
-            (ScalarValue::Bool(a), ScalarValue::Bool(b)) => a == b,
-            (ScalarValue::Timestamp(a), ScalarValue::Timestamp(b)) => a == b,
+            (AttributeValue::Integer(ai), AttributeValue::Integer(bi)) => ai == bi,
+            (AttributeValue::Float(af), AttributeValue::Float(bf)) => af == bf,
+            (AttributeValue::Integer(ai), AttributeValue::Float(bf)) => {
+                OrderedFloat(*ai as f64) == *bf
+            }
+            (AttributeValue::Float(af), AttributeValue::Integer(bi)) => {
+                *af == OrderedFloat(*bi as f64)
+            }
+            (AttributeValue::String(a), AttributeValue::String(b)) => a == b,
+            (AttributeValue::Bool(a), AttributeValue::Bool(b)) => a == b,
+            (AttributeValue::Timestamp(a), AttributeValue::Timestamp(b)) => a == b,
             _ => false,
         }
     }
+
+    fn stack_scalar_eq(a: &StackValue, b: &StackValue) -> bool {
+        match (a, b) {
+            (StackValue::Integer(ai), StackValue::Integer(bi)) => ai == bi,
+            (StackValue::Float(af), StackValue::Float(bf)) => af == bf,
+            (StackValue::Integer(ai), StackValue::Float(bf)) => OrderedFloat(*ai as f64) == *bf,
+            (StackValue::Float(af), StackValue::Integer(bi)) => *af == OrderedFloat(*bi as f64),
+            (StackValue::String(a), StackValue::String(b)) => a == b,
+            (StackValue::Timestamp(a), StackValue::Timestamp(b)) => a == b,
+            _ => false,
+        }
+    }
+
 
     /// Scalar ordering for use by `Lt`/`Lte`/`Gt`/`Gte`. Eliminates the four
     /// near-identical match blocks that would otherwise exist for each operator.
     ///
     /// Same int/float coercion caveat as `scalar_eq`.
-    fn scalar_cmp(a: &ScalarValue, b: &ScalarValue) -> Result<Ordering, String> {
+    fn stack_scalar_cmp(a: &StackValue, b: &StackValue) -> Result<Ordering, String> {
         match (a, b) {
-            (ScalarValue::Integer(ai), ScalarValue::Integer(bi)) => Ok(ai.cmp(bi)),
-            (ScalarValue::Float(af), ScalarValue::Float(bf)) => Ok(af.cmp(bf)),
-            (ScalarValue::Integer(ai), ScalarValue::Float(bf)) => {
+            (StackValue::Integer(ai), StackValue::Integer(bi)) => Ok(ai.cmp(bi)),
+            (StackValue::Float(af), StackValue::Float(bf)) => Ok(af.cmp(bf)),
+            (StackValue::Integer(ai), StackValue::Float(bf)) => {
                 Ok(OrderedFloat(*ai as f64).cmp(bf))
             }
-            (ScalarValue::Float(af), ScalarValue::Integer(bi)) => {
+            (StackValue::Float(af), StackValue::Integer(bi)) => {
                 Ok(af.cmp(&OrderedFloat(*bi as f64)))
             }
-            (ScalarValue::String(a), ScalarValue::String(b)) => Ok(a.cmp(b)),
-            (ScalarValue::Timestamp(a), ScalarValue::Timestamp(b)) => Ok(a.cmp(b)),
+            (StackValue::String(a), StackValue::String(b)) => Ok(a.cmp(b)),
+            (StackValue::Timestamp(a), StackValue::Timestamp(b)) => Ok(a.cmp(b)),
             _ => Err(format!("cannot order {:?} and {:?}", a, b)),
         }
     }
@@ -603,8 +752,27 @@ impl<'a> BytecodeVM<'a> {
     /// Used by `ContainsAll` and `ContainsAny` instead of derived `PartialEq`.
     fn attribute_value_eq(a: &AttributeValue, b: &AttributeValue) -> bool {
         match (a, b) {
-            (AttributeValue::Scalar(sa), AttributeValue::Scalar(sb)) => Self::scalar_eq(sa, sb),
             (AttributeValue::EntityRef(ea), AttributeValue::EntityRef(eb)) => ea == eb,
+            (AttributeValue::Integer(_), _)
+            | (AttributeValue::Float(_), _)
+            | (AttributeValue::String(_), _)
+            | (AttributeValue::Bool(_), _)
+            | (AttributeValue::Timestamp(_), _) => Self::scalar_eq(a, b),
+            _ => false,
+        }
+    }
+
+    fn stack_val_attribute_val_eq(a: &StackValue, b: &AttributeValue) -> bool {
+        match (a, b) {
+            (StackValue::Integer(ai), AttributeValue::Integer(bi)) => ai == bi,
+            (StackValue::Float(af), AttributeValue::Float(bf)) => af == bf,
+            (StackValue::Integer(ai), AttributeValue::Float(bf)) => OrderedFloat(*ai as f64) == *bf,
+            (StackValue::Float(af), AttributeValue::Integer(bi)) => *af == OrderedFloat(*bi as f64),
+            (StackValue::String(as_val), AttributeValue::String(bs)) => as_val == bs,
+            (StackValue::Bool(ab), AttributeValue::Bool(bb)) => ab == bb,
+            (StackValue::Timestamp(at), AttributeValue::Timestamp(bt)) => at == bt,
+            (StackValue::EntityRef(ae), AttributeValue::EntityRef(be)) => ae == be,
+            (StackValue::IpAddr(ai), AttributeValue::IpAddr(bi)) => ai == bi,
             _ => false,
         }
     }
@@ -655,7 +823,7 @@ mod tests {
     use super::*;
     use arbor_types::{
         AttributeNameId, AttributeValue, Attributes, EntityTypeId, IndexedEntity,
-        ScalarValue, VariableRef, VariableScope,
+        VariableRef, VariableScope,
     };
     use roaring::RoaringBitmap;
 
@@ -692,8 +860,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(42)),
-            OpCode::PushScalar(ScalarValue::Integer(42)),
+            OpCode::PushInteger(42),
+            OpCode::PushInteger(42),
             OpCode::Eq,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -706,8 +874,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(42)),
-            OpCode::PushScalar(ScalarValue::Integer(43)),
+            OpCode::PushInteger(42),
+            OpCode::PushInteger(43),
             OpCode::Eq,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -720,11 +888,11 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(10)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(10),
+            OpCode::PushInteger(20),
             OpCode::Lt,
-            OpCode::PushScalar(ScalarValue::Integer(5)),
-            OpCode::PushScalar(ScalarValue::Integer(5)),
+            OpCode::PushInteger(5),
+            OpCode::PushInteger(5),
             OpCode::Eq,
             OpCode::And,
         ]);
@@ -739,11 +907,11 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         // (10 > 20) OR (5 == 5) → false OR true → true
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(10)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(10),
+            OpCode::PushInteger(20),
             OpCode::Gt,
-            OpCode::PushScalar(ScalarValue::Integer(5)),
-            OpCode::PushScalar(ScalarValue::Integer(5)),
+            OpCode::PushInteger(5),
+            OpCode::PushInteger(5),
             OpCode::Eq,
             OpCode::Or,
         ]);
@@ -758,8 +926,8 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         // NOT(5 == 10) → NOT(false) → true
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(5)),
-            OpCode::PushScalar(ScalarValue::Integer(10)),
+            OpCode::PushInteger(5),
+            OpCode::PushInteger(10),
             OpCode::Eq,
             OpCode::Not,
         ]);
@@ -774,29 +942,29 @@ mod tests {
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(10)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(10),
+            OpCode::PushInteger(20),
             OpCode::Lt,
         ]), ConditionResult::True);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(20)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(20),
+            OpCode::PushInteger(20),
             OpCode::Lte,
         ]), ConditionResult::True);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(30)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(30),
+            OpCode::PushInteger(20),
             OpCode::Gt,
         ]), ConditionResult::True);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(20)),
-            OpCode::PushScalar(ScalarValue::Integer(20)),
+            OpCode::PushInteger(20),
+            OpCode::PushInteger(20),
             OpCode::Gte,
         ]), ConditionResult::True);
     }
@@ -811,7 +979,7 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("gold".into())),
+            OpCode::PushString("gold".into()),
             OpCode::Eq,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -828,7 +996,7 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("restricted".into())),
+            OpCode::PushString("restricted".into()),
             OpCode::Neq,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -842,7 +1010,7 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::Integer(10)),
+            OpCode::PushInteger(10),
             OpCode::Lt,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -856,7 +1024,7 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushSet(vec![AttributeValue::Scalar(ScalarValue::String("admin".into()))]),
+            OpCode::PushSet(vec![ AttributeValue::String("admin".into( ))]),
             OpCode::In,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -891,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_has_attribute_present() {
-        let principal = make_entity_with_attr(1, AttributeValue::Scalar(ScalarValue::Bool(true)));
+        let principal = make_entity_with_attr(1,  AttributeValue::Bool(true ));
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
@@ -915,14 +1083,14 @@ mod tests {
     fn test_variable_resolution_eq() {
         let principal = make_entity_with_attr(
             1,
-            AttributeValue::Scalar(ScalarValue::String("gold".into())),
+             AttributeValue::String("gold".into( )),
         );
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("gold".into())),
+            OpCode::PushString("gold".into()),
             OpCode::Eq,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -937,11 +1105,11 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Bool(true)),
-            OpCode::PushScalar(ScalarValue::Bool(true)),
+            OpCode::PushBool(true),
+            OpCode::PushBool(true),
             OpCode::Eq,
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("gold".into())),
+            OpCode::PushString("gold".into()),
             OpCode::Eq,
             OpCode::And,
         ]);
@@ -960,11 +1128,11 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushSet(vec![
-                AttributeValue::Scalar(ScalarValue::Integer(5)),
-                AttributeValue::Scalar(ScalarValue::Integer(10)),
+                 AttributeValue::Integer(5 ),
+                 AttributeValue::Integer(10 ),
             ]),
             OpCode::PushSet(vec![
-                AttributeValue::Scalar(ScalarValue::Float(ordered_float::OrderedFloat(5.0))),
+                 AttributeValue::Float(ordered_float::OrderedFloat(5.0 )),
             ]),
             OpCode::ContainsAll,
         ]);
@@ -978,10 +1146,10 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("editor".into())),
+            OpCode::PushString("editor".into()),
             OpCode::PushSet(vec![
-                AttributeValue::Scalar(ScalarValue::String("admin".into())),
-                AttributeValue::Scalar(ScalarValue::String("editor".into())),
+                 AttributeValue::String("admin".into( )),
+                 AttributeValue::String("editor".into( )),
             ]),
             OpCode::In,
         ]);
@@ -995,8 +1163,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(42)),
-            OpCode::PushScalar(ScalarValue::Integer(42)),
+            OpCode::PushInteger(42),
+            OpCode::PushInteger(42),
             OpCode::Neq,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -1009,8 +1177,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::Integer(42)),
-            OpCode::PushScalar(ScalarValue::Integer(99)),
+            OpCode::PushInteger(42),
+            OpCode::PushInteger(99),
             OpCode::Neq,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -1025,8 +1193,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("hello".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("hello".into()),
             OpCode::StartsWith,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -1039,8 +1207,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("world".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("world".into()),
             OpCode::StartsWith,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -1053,8 +1221,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("world".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("world".into()),
             OpCode::EndsWith,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -1067,8 +1235,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("lo wo".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("lo wo".into()),
             OpCode::StringContains,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -1083,28 +1251,28 @@ mod tests {
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("prefix".into())),
+            OpCode::PushString("prefix".into()),
             OpCode::StartsWith,
         ]), ConditionResult::False);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("suffix".into())),
+            OpCode::PushString("suffix".into()),
             OpCode::EndsWith,
         ]), ConditionResult::False);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("needle".into())),
+            OpCode::PushString("needle".into()),
             OpCode::StringContains,
         ]), ConditionResult::False);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushScalar(ScalarValue::String("*".into())),
+            OpCode::PushString("*".into()),
             OpCode::Like,
         ]), ConditionResult::False);
     }
@@ -1161,8 +1329,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
-            OpCode::PushScalar(ScalarValue::String("hello world".into())),
-            OpCode::PushScalar(ScalarValue::String("hello*".into())),
+            OpCode::PushString("hello world".into()),
+            OpCode::PushString("hello*".into()),
             OpCode::Like,
         ]);
         assert_eq!(result, ConditionResult::True);
@@ -1394,7 +1562,7 @@ mod tests {
         let store = TestEntityResolver::new();
         let principal = make_entity_with_attr(
             1,
-            AttributeValue::Scalar(ScalarValue::String("not-an-entity".into())),
+             AttributeValue::String("not-an-entity".into( )),
         );
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
@@ -1518,7 +1686,7 @@ mod tests {
     fn test_contains_in_hierarchy_non_entity_ref_is_invalid() {
         let store = TestEntityResolver::new();
         let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-            AttributeValue::Scalar(ScalarValue::String("not-an-entity".into())),
+             AttributeValue::String("not-an-entity".into( )),
         ]));
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
@@ -1543,5 +1711,77 @@ mod tests {
             OpCode::ContainsInHierarchy(50),
         ]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
+    }
+
+    #[test]
+    fn test_short_circuit_and_with_missing() {
+        let principal = make_test_entity(); // has nothing
+        let resource = make_test_entity();
+        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let mut vm = BytecodeVM::new(&ctx);
+
+        // Instructions:
+        // 0: PushVariable(1)
+        // 1: PushScalar(1)
+        // 2: Eq -> false
+        // 3: JumpIfFalse(8)
+        // 4: PushVariable(2)
+        // 5: PushScalar(2)
+        // 6: Eq
+        // 7: Jump(9)
+        // 8: PushScalar(false)
+        let instructions = vec![
+            OpCode::PushVariable(var_ref_principal(1)),
+            OpCode::PushInteger(1),
+            OpCode::Eq,              // -> false
+            OpCode::JumpIfFalse(8),  // jump taken
+            OpCode::PushVariable(var_ref_principal(2)),
+            OpCode::PushInteger(2),
+            OpCode::Eq,
+            OpCode::Jump(9),
+            OpCode::PushBool(false),
+        ];
+
+        let result = vm.evaluate(&instructions);
+        assert_eq!(result, ConditionResult::False);
+    }
+
+    #[test]
+    fn test_short_circuit_or_with_missing() {
+        let principal = make_test_entity();
+        let resource = make_test_entity();
+        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let mut _vm_placeholder = BytecodeVM::new(&ctx);
+
+        // (principal.missing == 1) || (principal.present == "value")
+        // principal.present exists.
+        let principal = make_entity_with_attr(2,  AttributeValue::String("value".into( )));
+        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let mut vm = BytecodeVM::new(&ctx);
+
+        // Instructions:
+        // 0: PushVariable(1)
+        // 1: PushScalar(1)
+        // 2: Eq -> false
+        // 3: JumpIfTrue(8)
+        // 4: PushVariable(2)
+        // 5: PushScalar("value")
+        // 6: Eq -> true
+        // 7: Jump(9)
+        // 8: PushScalar(true)
+        let instructions = vec![
+            OpCode::PushVariable(var_ref_principal(1)),
+            OpCode::PushInteger(1),
+            OpCode::Eq,              // -> false
+            OpCode::JumpIfTrue(8),   // jump NOT taken
+            OpCode::PushVariable(var_ref_principal(2)),
+            OpCode::PushString("value".into()),
+            OpCode::Eq,              // -> true
+            OpCode::Jump(9),
+            OpCode::PushBool(true),
+        ];
+
+        let result = vm.evaluate(&instructions);
+        assert_eq!(result, ConditionResult::True);
     }
 }

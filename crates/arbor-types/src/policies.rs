@@ -3,7 +3,6 @@ use crate::conditions::{Condition, VariableRef};
 use crate::ids::EntityTypeId;
 use uuid::Uuid;
 use crate::CompiledCondition;
-use smallvec::SmallVec;
 
 /// Policy types in the system
 #[derive(Debug, Clone, PartialEq, Eq)]

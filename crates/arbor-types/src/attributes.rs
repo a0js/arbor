@@ -1,21 +1,18 @@
 use crate::ids::AttributeNameId;
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use ordered_float::OrderedFloat;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub enum ScalarValue {
+pub enum AttributeValue {
     String(String),
     Float(OrderedFloat<f64>),
     Integer(i64),
     Bool(bool),
     Timestamp(DateTime<Utc>),
-}
-
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub enum AttributeValue {
-    Scalar(ScalarValue),
+    IpAddr(IpAddr),
     EntityRef(Uuid),          // Reference to another entity
     Set(Vec<AttributeValue>), // Set of attribute values
     Object(Attributes),       // Nested attributes object

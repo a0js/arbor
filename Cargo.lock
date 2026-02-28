@@ -20,6 +20,7 @@ name = "arbor-bytecode"
 version = "0.1.0"
 dependencies = [
  "arbor-types",
+ "chrono",
  "ordered-float",
  "roaring",
  "tracing",
