@@ -15,6 +15,12 @@ pub struct Graph {
     pub uuid_to_index: RapidHashMap<Uuid, u32>
 }
 
+impl Default for Graph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Graph {
     pub fn new() -> Self {
         Self {

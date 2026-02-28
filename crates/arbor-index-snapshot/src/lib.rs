@@ -21,6 +21,12 @@ pub struct Snapshot {
     pub descendant_resource_policies: RoaringBitmap,
 }
 
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Snapshot {
     pub fn new() -> Self {
         Self {

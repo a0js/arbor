@@ -71,7 +71,7 @@ fn dfs_reachability(
     if let Some(neighbors) = adjacency_map.get(current_uuid) {
         for neighbor_uuid in neighbors {
             if let Some(&index) = graph.uuid_to_index.get(neighbor_uuid) {
-                results.insert(index as u32);
+                results.insert(index);
             }
             dfs_reachability(graph, neighbor_uuid, adjacency_map, visited, path, results)?;
         }

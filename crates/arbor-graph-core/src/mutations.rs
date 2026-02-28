@@ -164,7 +164,7 @@ impl super::graph::Graph {
     /// Get or create an index for an Uuid
     fn get_or_create_index(&mut self, node_id: &Uuid) -> NodeNewOrExisting {
         // Check if Uuid already has an index
-        if let Some(existing) = self.uuid_to_index.get(&node_id) {
+        if let Some(existing) = self.uuid_to_index.get(node_id) {
             return NodeNewOrExisting::Existing(*existing);
         }
 
