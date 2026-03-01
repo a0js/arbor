@@ -61,15 +61,14 @@ fn expand_actions(
         }
     }
     for set_uuid in &policy.action_sets {
-        if let Some(&set_idx) = uuid_to_index.get(set_uuid) {
-            if let Some(NodeType::ActionSet(action_set)) = nodes.get(set_idx as usize) {
+        if let Some(&set_idx) = uuid_to_index.get(set_uuid)
+            && let Some(NodeType::ActionSet(action_set)) = nodes.get(set_idx as usize) {
                 for uuid in &action_set.actions {
                     if let Some(&i) = uuid_to_index.get(uuid) {
                         actions.insert(i);
                     }
                 }
             }
-        }
     }
 
     actions
@@ -179,7 +178,7 @@ impl BuildState {
         for action_idx in &actions {
             self.action_to_policies
                 .entry(action_idx)
-                .or_insert_with(RoaringBitmap::new)
+                .or_default()
                 .insert(idx);
         }
 

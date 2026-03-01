@@ -51,6 +51,12 @@ use arbor_types::{AttributeValue, Condition, CompiledCondition, OpCode, Operand,
 /// ```
 pub struct BytecodeCompiler {}
 
+impl Default for BytecodeCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BytecodeCompiler {
     pub fn new() -> Self {
         Self {  }
@@ -347,7 +353,7 @@ impl BytecodeCompiler {
             Operand::Timestamp(t) => Ok(AttributeValue::Timestamp(*t)),
             Operand::IpAddr(ip) => Ok(AttributeValue::IpAddr(*ip)),
             Operand::IpNetwork(net) => Ok(AttributeValue::IpNetwork(*net)),
-            Operand::EntityRef(ent) => Ok(AttributeValue::EntityRef(ent.clone())),
+            Operand::EntityRef(ent) => Ok(AttributeValue::EntityRef(*ent)),
             Operand::Set(items) => {
                 let avs = items
                     .iter()
@@ -371,7 +377,7 @@ impl BytecodeCompiler {
     ) -> Result<(), CompileError> {
         let descendant = match left {
             Operand::Variable(var_ref) => ResolvedEntityIndex::Variable(var_ref.clone()),
-            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(ent.clone()),
+            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(*ent),
             _ => {
                 return Err(CompileError::InvalidOperand(
                     "InHierarchy left operand must be a Variable or EntityRef".into(),
@@ -381,7 +387,7 @@ impl BytecodeCompiler {
 
         let ancestor = match right {
             Operand::Variable(var_ref) => ResolvedEntityIndex::Variable(var_ref.clone()),
-            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(ent.clone()),
+            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(*ent),
             _ => {
                 return Err(CompileError::InvalidOperand(
                     "InHierarchy right operand must be a Variable or EntityRef".into(),
