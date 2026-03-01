@@ -327,7 +327,7 @@ fn eval_cond(condition: &Condition, context: &EvaluationContext) -> Result<bool,
             };
             match context.entities.get_entity(entity_idx) {
                 Some(entity) => Ok(entity.ancestors.contains(target_idx)),
-                None => Ok(false),
+                None => Err(EvaluationError::MissingEntity { entity_index: entity_idx }),
             }
         }
 

@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 9126d8425bfccd1f2010dce805304fba03b1ac4847a161061e08243d3463d8fc # shrinks to condition = Not(ContainsAll(Variable(VariableRef { scope: Principal, path: [StringId(0, PhantomData<arbor_types::ids::AttributeNameMarker>)] }), Integer(0))), p_attrs = {}, r_attrs = {}, c_attrs = {}

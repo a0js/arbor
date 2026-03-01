@@ -1,4 +1,3 @@
-
 use arbor_bytecode::compiler::BytecodeCompiler;
 use arbor_bytecode::bytecode_vm::BytecodeVM;
 use arbor_bytecode::evaluate_ast;
@@ -8,42 +7,21 @@ use arbor_types::{
 };
 use proptest::prelude::*;
 use roaring::RoaringBitmap;
-use uuid::Uuid;
-use chrono::{Utc, TimeZone, DateTime};
+use chrono::{Utc, TimeZone};
 use ordered_float::OrderedFloat;
-use std::collections::HashMap;
 
-// --- Mock Infrastructure ---
+// ---------------------------------------------------------------------------
+// Test infrastructure
+// ---------------------------------------------------------------------------
 
-struct MockResolver {
-    uuids: HashMap<Uuid, u32>,
-    entities: HashMap<u32, IndexedEntity>,
+struct NoopResolver;
+impl EntityResolver for NoopResolver {
+    fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
 }
 
-impl MockResolver {
-    fn new() -> Self {
-        Self {
-            uuids: HashMap::new(),
-            entities: HashMap::new(),
-        }
-    }
-    fn add_entity(&mut self, uuid: Uuid, idx: u32, entity: IndexedEntity) {
-        self.uuids.insert(uuid, idx);
-        self.entities.insert(idx, entity);
-    }
-}
-
-impl EntityResolver for MockResolver {
-    fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
-        self.entities.get(&index)
-    }
-    fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32> {
-        self.uuids.get(uuid).copied()
-    }
-}
-
-fn empty_entity() -> IndexedEntity {
+fn empty_entity(idx: u32) -> IndexedEntity {
     IndexedEntity {
+        idx,
         attributes: Attributes::new(),
         entity_type: EntityTypeId::new(0),
         descendants: RoaringBitmap::new(),
@@ -53,11 +31,9 @@ fn empty_entity() -> IndexedEntity {
     }
 }
 
-// --- Strategies ---
-
-fn arb_uuid() -> impl Strategy<Value = Uuid> {
-    any::<[u8; 16]>().prop_map(Uuid::from_bytes)
-}
+// ---------------------------------------------------------------------------
+// Strategies
+// ---------------------------------------------------------------------------
 
 fn arb_attribute_value() -> BoxedStrategy<AttributeValue> {
     let leaf = prop_oneof![
@@ -65,12 +41,10 @@ fn arb_attribute_value() -> BoxedStrategy<AttributeValue> {
         any::<f64>().prop_map(|f| AttributeValue::Float(OrderedFloat(f))),
         any::<bool>().prop_map(AttributeValue::Bool),
         ".*".prop_map(AttributeValue::String),
-        arb_uuid().prop_map(AttributeValue::EntityRef),
+        any::<u32>().prop_map(AttributeValue::EntityRef),
     ];
     leaf.prop_recursive(3, 16, 8, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner, 0..4).prop_map(AttributeValue::Set),
-        ]
+        prop::collection::vec(inner, 0..4).prop_map(AttributeValue::Set)
     }).boxed()
 }
 
@@ -93,13 +67,11 @@ fn arb_operand() -> BoxedStrategy<Operand> {
         any::<f64>().prop_map(|f| Operand::Float(OrderedFloat(f))),
         any::<bool>().prop_map(Operand::Bool),
         ".*".prop_map(Operand::String),
-        arb_uuid().prop_map(Operand::EntityRef),
+        any::<u32>().prop_map(Operand::EntityRef),
         arb_variable_ref().prop_map(Operand::Variable),
     ];
     leaf.prop_recursive(3, 16, 8, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner, 0..4).prop_map(Operand::Set),
-        ]
+        prop::collection::vec(inner, 0..4).prop_map(Operand::Set)
     }).boxed()
 }
 
@@ -120,10 +92,12 @@ fn arb_condition() -> BoxedStrategy<Condition> {
         (arb_operand(), arb_operand()).prop_map(|(l, r)| Condition::EndsWith(l, r)),
         (arb_operand(), arb_operand()).prop_map(|(l, r)| Condition::StringContains(l, r)),
         (arb_operand(), arb_operand()).prop_map(|(l, r)| Condition::Like(l, r)),
-        (arb_operand(), any::<u32>().prop_map(AttributeNameId::new)).prop_map(|(op, id)| Condition::HasAttribute(op, id)),
-        (arb_variable_scope(), any::<u32>().prop_map(EntityTypeId::new)).prop_map(|(s, id)| Condition::IsType(s, id)),
+        (arb_operand(), any::<u32>().prop_map(AttributeNameId::new))
+            .prop_map(|(op, id)| Condition::HasAttribute(op, id)),
+        (arb_variable_scope(), any::<u32>().prop_map(EntityTypeId::new))
+            .prop_map(|(s, id)| Condition::IsType(s, id)),
     ];
-    
+
     leaf.prop_recursive(4, 32, 8, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..4).prop_map(Condition::And),
@@ -133,49 +107,47 @@ fn arb_condition() -> BoxedStrategy<Condition> {
     }).boxed()
 }
 
-// --- Test Property ---
+// ---------------------------------------------------------------------------
+// Property: bytecode VM and AST evaluator always agree
+// ---------------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
     #[test]
     fn test_bytecode_vs_ast_equivalence(
         condition in arb_condition(),
-        p_attrs in prop::collection::hash_map(any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
-        r_attrs in prop::collection::hash_map(any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
-        c_attrs in prop::collection::hash_map(any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
+        p_attrs in prop::collection::hash_map(
+            any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
+        r_attrs in prop::collection::hash_map(
+            any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
+        c_attrs in prop::collection::hash_map(
+            any::<u32>().prop_map(AttributeNameId::new), arb_attribute_value(), 0..10),
     ) {
-        let resolver = MockResolver::new();
-        let compiler = BytecodeCompiler::new(&resolver);
-
-        // Compile
-        let compiled = match compiler.compile(&condition) {
+        let compiled = match BytecodeCompiler::new().compile(&condition) {
             Ok(c) => c,
-            Err(_) => return Ok(()), // Skip invalid conditions (e.g. Variable in Set)
+            Err(_) => return Ok(()), // Skip structurally invalid conditions
         };
 
-        // Setup Context
-        let mut principal = empty_entity();
+        let mut principal = empty_entity(1);
         for (id, val) in p_attrs { principal.attributes.set(id, val); }
-        let mut resource = empty_entity();
+        let mut resource = empty_entity(2);
         for (id, val) in r_attrs { resource.attributes.set(id, val); }
         let mut context_attrs = Attributes::new();
         for (id, val) in c_attrs { context_attrs.set(id, val); }
 
-        let context = EvaluationContext::new(&principal, &resource, Some(&context_attrs)).with_entities(&resolver);
+        let context = EvaluationContext::new(&principal, &resource, Some(&context_attrs), &NoopResolver);
 
-        // Evaluate AST
         let ast_result = evaluate_ast(&condition, &context);
+        let bc_result  = BytecodeVM::new(&context).evaluate(&compiled.instructions);
 
-        // Evaluate Bytecode
-        let mut vm = BytecodeVM::new(&context);
-        let bc_result = vm.evaluate(&compiled.instructions);
-
-        // Assert Equivalence
         match (&ast_result, &bc_result) {
-            (ConditionResult::True, ConditionResult::True) => (),
-            (ConditionResult::False, ConditionResult::False) => (),
-            (ConditionResult::Invalid(_), ConditionResult::Invalid(_)) => (),
-            _ => panic!("Equivalence failed for condition: {:?}\nAST: {:?}\nVM: {:?}", condition, ast_result, bc_result),
+            (ConditionResult::True,    ConditionResult::True)    => {}
+            (ConditionResult::False,   ConditionResult::False)   => {}
+            (ConditionResult::Invalid(_), ConditionResult::Invalid(_)) => {}
+            _ => panic!(
+                "Equivalence failed!\ncondition: {:?}\nAST: {:?}\nVM:  {:?}",
+                condition, ast_result, bc_result
+            ),
         }
     }
 }
