@@ -4,9 +4,8 @@ use ipnet::IpNet;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use ordered_float::OrderedFloat;
-use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
     String(String),
     Float(OrderedFloat<f64>),
@@ -15,13 +14,13 @@ pub enum AttributeValue {
     Timestamp(DateTime<Utc>),
     IpAddr(IpAddr),
     IpNetwork(IpNet),
-    EntityRef(Uuid),          // Reference to another entity
+    EntityRef(u32),          // Reference to another entity
     Set(Vec<AttributeValue>), // Set of attribute values
     Object(Attributes),       // Nested attributes object
 }
 
 /// Attributes wrapper that provides efficient nested object support
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Attributes {
     data: BTreeMap<AttributeNameId, AttributeValue>,
 }

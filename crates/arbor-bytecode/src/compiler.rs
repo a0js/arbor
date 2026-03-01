@@ -1,13 +1,10 @@
 //! Bytecode compiler: translates a [`Condition`] AST into a [`Vec<OpCode>`].
 //!
-//! The compiler performs two jobs:
-//!
-//! 1. Structural translation — each `Condition` variant maps to one or more
-//!    `OpCode` instructions following the stack discipline the VM expects.
-//! 2. UUID resolution — hierarchy opcodes (`InHierarchy`, `ContainsInHierarchy`)
-//!    require a snapshot index (`u32`) rather than a UUID.  The compiler asks the
-//!    supplied [`EntityResolver`] to perform this lookup at compile time so the VM
-//!    never touches UUIDs at evaluation time.
+//! The compiler performs structural translation — each `Condition` variant maps
+//! to one or more `OpCode` instructions following the stack discipline the VM
+//! expects.  All entity references in `Condition` operands are already `u32`
+//! snapshot indices (UUID resolution happens at index time), so no resolver is
+//! needed during compilation.
 //!
 //! ## Stack discipline
 //!
@@ -18,59 +15,29 @@
 //! ## Example
 //!
 //! ```rust
-//! use std::collections::HashMap;
-//! use uuid::Uuid;
-//! use arbor_types::{
-//!     Condition, Operand, AttributeValue, OpCode, EntityResolver, IndexedEntity, CompileError
-//! };
+//! use arbor_types::{Condition, Operand, CompileError};
 //! use arbor_bytecode::compiler::BytecodeCompiler;
 //!
-//! struct NoopResolver;
-//! impl EntityResolver for NoopResolver {
-//!     fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
-//!     fn resolve_uuid(&self, _: &Uuid) -> Option<u32> { None }
-//! }
-//!
-//! let resolver = NoopResolver;
-//! let compiler = BytecodeCompiler::new(&resolver);
 //! let condition = Condition::Eq(
 //!     Operand::Integer(1),
 //!     Operand::Integer(1),
 //! );
-//! let compiled = compiler.compile(&condition).unwrap();
+//! let compiled = BytecodeCompiler::new().compile(&condition).unwrap();
 //! assert_eq!(compiled.instructions.len(), 3); // PushScalar, PushScalar, Eq
 //! ```
 
-use arbor_types::{AttributeValue, Condition, CompiledCondition, CompileWarning, EntityResolver, OpCode, Operand, VariableRef, VariableScope, CompileError};
-use uuid::Uuid;
-use tracing::warn;
+use arbor_types::{AttributeValue, Condition, CompiledCondition, OpCode, Operand, VariableRef, CompileError, ResolvedEntityIndex};
 
 // ── Compiler ─────────────────────────────────────────────────────────────────
 
 /// Translates a [`Condition`] AST into a [`CompiledCondition`] (bytecode +
 /// dependency list).
 ///
-/// The compiler borrows an [`EntityResolver`] for the duration of compilation
-/// so it can resolve entity UUIDs to snapshot indices for hierarchy opcodes.
-///
 /// # Example
 ///
 /// ```rust
-/// use uuid::Uuid;
-/// use arbor_types::{
-///     Condition, Operand, AttributeValue, VariableRef, VariableScope,
-///     OpCode, EntityResolver, IndexedEntity,
-/// };
+/// use arbor_types::{Condition, Operand};
 /// use arbor_bytecode::compiler::BytecodeCompiler;
-///
-/// struct NoopResolver;
-/// impl EntityResolver for NoopResolver {
-///     fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
-///     fn resolve_uuid(&self, _: &Uuid) -> Option<u32> { None }
-/// }
-///
-/// let resolver = NoopResolver;
-/// let compiler = BytecodeCompiler::new(&resolver);
 ///
 /// let condition = Condition::And(vec![
 ///     Condition::Eq(
@@ -78,19 +45,15 @@ use tracing::warn;
 ///         Operand::Bool(true),
 ///     ),
 /// ]);
-/// let compiled = compiler.compile(&condition).unwrap();
+/// let compiled = BytecodeCompiler::new().compile(&condition).unwrap();
 /// // Single-element And emits no And opcode — just the inner instructions.
 /// assert_eq!(compiled.instructions.len(), 3); // PushScalar, PushScalar, Eq
 /// ```
-pub struct BytecodeCompiler<'a> {
-    resolver: &'a dyn EntityResolver,
-}
+pub struct BytecodeCompiler {}
 
-impl<'a> BytecodeCompiler<'a> {
-    /// Create a new compiler backed by the given entity resolver.
-    #[must_use]
-    pub fn new(resolver: &'a dyn EntityResolver) -> Self {
-        Self { resolver }
+impl BytecodeCompiler {
+    pub fn new() -> Self {
+        Self {  }
     }
 
     /// Compile `condition` to a [`CompiledCondition`].
@@ -98,15 +61,13 @@ impl<'a> BytecodeCompiler<'a> {
     /// # Errors
     ///
     /// Returns [`CompileError`] if:
-    /// - A referenced entity UUID cannot be resolved (hierarchy ops).
     /// - An unsupported operation is encountered (`InNetwork`).
     /// - An operand is structurally invalid for its enclosing condition.
     pub fn compile(&self, condition: &Condition) -> Result<CompiledCondition, CompileError> {
         let mut instructions = Vec::new();
-        let mut warnings = Vec::new();
-        self.compile_condition(&mut instructions, &mut warnings, condition)?;
+        self.compile_condition(&mut instructions, condition)?;
         let dependencies = condition.compute_dependencies();
-        Ok(CompiledCondition { instructions, dependencies, warnings })
+        Ok(CompiledCondition { instructions, dependencies })
     }
 
     // ── Private: recursive condition compiler ────────────────────────────────
@@ -114,7 +75,6 @@ impl<'a> BytecodeCompiler<'a> {
     fn compile_condition(
         &self,
         ops: &mut Vec<OpCode>,
-        warnings: &mut Vec<CompileWarning>,
         condition: &Condition,
     ) -> Result<(), CompileError> {
         match condition {
@@ -129,10 +89,10 @@ impl<'a> BytecodeCompiler<'a> {
             }
 
             // --- Logical --------------------------------------------------------
-            Condition::And(conds) => self.compile_and(ops, warnings, conds)?,
-            Condition::Or(conds) => self.compile_or(ops, warnings, conds)?,
+            Condition::And(conds) => self.compile_and(ops, conds)?,
+            Condition::Or(conds) => self.compile_or(ops, conds)?,
             Condition::Not(inner) => {
-                self.compile_condition(ops, warnings, inner)?;
+                self.compile_condition(ops, inner)?;
                 ops.push(OpCode::Not);
             }
 
@@ -234,10 +194,7 @@ impl<'a> BytecodeCompiler<'a> {
 
             // --- Hierarchy ------------------------------------------------------
             Condition::InHierarchy(left, right) => {
-                self.compile_in_hierarchy(ops, warnings, left, right)?;
-            }
-            Condition::ContainsInHierarchy(left, right) => {
-                self.compile_contains_in_hierarchy(ops, warnings, left, right)?;
+                self.compile_in_hierarchy(ops, left, right)?;
             }
 
             // --- IP network membership ------------------------------------------
@@ -253,7 +210,6 @@ impl<'a> BytecodeCompiler<'a> {
     fn compile_and(
         &self,
         ops: &mut Vec<OpCode>,
-        warnings: &mut Vec<CompileWarning>,
         conds: &[Condition],
     ) -> Result<(), CompileError> {
         match conds.len() {
@@ -261,19 +217,19 @@ impl<'a> BytecodeCompiler<'a> {
                 ops.push(OpCode::PushBool(true));
             }
             1 => {
-                self.compile_condition(ops, warnings, &conds[0])?;
+                self.compile_condition(ops, &conds[0])?;
             }
             _ => {
                 // Emit each non-last condition with a JumpIfFalse placeholder
                 let mut false_patches = Vec::with_capacity(conds.len() - 1);
                 for cond in &conds[..conds.len() - 1] {
-                    self.compile_condition(ops, warnings, cond)?;
+                    self.compile_condition(ops, cond)?;
                     false_patches.push(ops.len());
                     ops.push(OpCode::JumpIfFalse(0)); // placeholder
                 }
 
                 // Last condition: its result is the final result if all prior were true
-                self.compile_condition(ops, warnings, conds.last().unwrap())?;
+                self.compile_condition(ops, conds.last().unwrap())?;
 
                 // Jump over the false_label
                 let end_patch = ops.len();
@@ -300,7 +256,6 @@ impl<'a> BytecodeCompiler<'a> {
     fn compile_or(
         &self,
         ops: &mut Vec<OpCode>,
-        warnings: &mut Vec<CompileWarning>,
         conds: &[Condition],
     ) -> Result<(), CompileError> {
         match conds.len() {
@@ -308,18 +263,18 @@ impl<'a> BytecodeCompiler<'a> {
                 ops.push(OpCode::PushBool(false));
             }
             1 => {
-                self.compile_condition(ops, warnings, &conds[0])?;
+                self.compile_condition(ops, &conds[0])?;
             }
             _ => {
                 let mut true_patches = Vec::with_capacity(conds.len() - 1);
                 for cond in &conds[..conds.len() - 1] {
-                    self.compile_condition(ops, warnings, cond)?;
+                    self.compile_condition(ops, cond)?;
                     true_patches.push(ops.len());
                     ops.push(OpCode::JumpIfTrue(0)); // placeholder
                 }
 
                 // Last condition — result flows through directly
-                self.compile_condition(ops, warnings, conds.last().unwrap())?;
+                self.compile_condition(ops, conds.last().unwrap())?;
 
                 let end_patch = ops.len();
                 ops.push(OpCode::Jump(0)); // placeholder
@@ -392,7 +347,7 @@ impl<'a> BytecodeCompiler<'a> {
             Operand::Timestamp(t) => Ok(AttributeValue::Timestamp(*t)),
             Operand::IpAddr(ip) => Ok(AttributeValue::IpAddr(*ip)),
             Operand::IpNetwork(net) => Ok(AttributeValue::IpNetwork(*net)),
-            Operand::EntityRef(uuid) => Ok(AttributeValue::EntityRef(*uuid)),
+            Operand::EntityRef(ent) => Ok(AttributeValue::EntityRef(ent.clone())),
             Operand::Set(items) => {
                 let avs = items
                     .iter()
@@ -411,96 +366,34 @@ impl<'a> BytecodeCompiler<'a> {
     fn compile_in_hierarchy(
         &self,
         ops: &mut Vec<OpCode>,
-        warnings: &mut Vec<CompileWarning>,
         left: &Operand,
         right: &Operand,
     ) -> Result<(), CompileError> {
-        // Right operand must be an EntityRef. If the UUID isn't in the current
-        // snapshot (e.g. policy was written before the entity was created),
-        // emit a constant false — no entity can be in the hierarchy of
-        // something that doesn't exist. The policy is still indexed and will
-        // evaluate correctly once the entity appears in a future snapshot.
-        let uuid = self.extract_entity_ref_uuid(right)?;
-        let Some(target_idx) = self.resolver.resolve_uuid(&uuid) else {
-            warn!(
-                uuid = %uuid,
-                "InHierarchy: entity UUID not found in snapshot; \
-                 compiling to constant false — policy will re-evaluate \
-                 correctly once the entity is indexed"
-            );
-            warnings.push(CompileWarning::UnresolvedEntityRef(uuid));
-            ops.push(OpCode::PushBool(false));
-            return Ok(());
-        };
-
-        match left {
-            Operand::Variable(var_ref) => {
-                if var_ref.path.is_empty() {
-                    // Root scope: use the fast InHierarchy opcode (reads entity
-                    // directly from context — no stack push).
-                    match var_ref.scope {
-                        VariableScope::Principal | VariableScope::Resource => {
-                            ops.push(OpCode::InHierarchy(var_ref.scope.clone(), target_idx));
-                        }
-                        VariableScope::Context => {
-                            return Err(CompileError::InvalidOperand(
-                                "InHierarchy on Context scope with empty path is not valid"
-                                    .into(),
-                            ));
-                        }
-                    }
-                } else {
-                    // Attribute path: use InHierarchyVar to resolve the entity
-                    // ref stored at the given attribute path.
-                    ops.push(OpCode::InHierarchyVar(var_ref.clone(), target_idx));
-                }
-            }
+        let descendant = match left {
+            Operand::Variable(var_ref) => ResolvedEntityIndex::Variable(var_ref.clone()),
+            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(ent.clone()),
             _ => {
                 return Err(CompileError::InvalidOperand(
-                    "InHierarchy left operand must be a Variable".into(),
+                    "InHierarchy left operand must be a Variable or EntityRef".into(),
                 ));
             }
-        }
+        };
+
+        let ancestor = match right {
+            Operand::Variable(var_ref) => ResolvedEntityIndex::Variable(var_ref.clone()),
+            Operand::EntityRef(ent) => ResolvedEntityIndex::Direct(ent.clone()),
+            _ => {
+                return Err(CompileError::InvalidOperand(
+                    "InHierarchy right operand must be a Variable or EntityRef".into(),
+                ));
+            }
+        };
+
+        ops.push(OpCode::InHierarchy(descendant, ancestor));
+
         Ok(())
     }
 
-    fn compile_contains_in_hierarchy(
-        &self,
-        ops: &mut Vec<OpCode>,
-        warnings: &mut Vec<CompileWarning>,
-        left: &Operand,
-        right: &Operand,
-    ) -> Result<(), CompileError> {
-        // Same graceful degradation as compile_in_hierarchy: unresolvable UUID
-        // → constant false, policy stays in the snapshot.
-        let uuid = self.extract_entity_ref_uuid(right)?;
-        let Some(target_idx) = self.resolver.resolve_uuid(&uuid) else {
-            warn!(
-                uuid = %uuid,
-                "ContainsInHierarchy: entity UUID not found in snapshot; \
-                 compiling to constant false — policy will re-evaluate \
-                 correctly once the entity is indexed"
-            );
-            warnings.push(CompileWarning::UnresolvedEntityRef(uuid));
-            ops.push(OpCode::PushBool(false));
-            return Ok(());
-        };
-
-        // Push the set (left operand) onto the stack.
-        match left {
-            Operand::Variable(_) | Operand::Set(_) => {
-                self.compile_operand(ops, left)?;
-            }
-            _ => {
-                return Err(CompileError::InvalidOperand(
-                    "ContainsInHierarchy left operand must be a Variable or Set".into(),
-                ));
-            }
-        }
-
-        ops.push(OpCode::ContainsInHierarchy(target_idx));
-        Ok(())
-    }
 
     fn compile_in_network(
         &self,
@@ -525,20 +418,6 @@ impl<'a> BytecodeCompiler<'a> {
         ops.push(OpCode::InNetwork);
         Ok(())
     }
-
-    /// Extract the UUID from an `Operand::EntityRef`.
-    ///
-    /// Returns `InvalidOperand` when the operand is not an `EntityRef`.
-    /// Callers are responsible for resolving the UUID to a snapshot index and
-    /// deciding what to emit when resolution fails.
-    fn extract_entity_ref_uuid(&self, operand: &Operand) -> Result<Uuid, CompileError> {
-        match operand {
-            Operand::EntityRef(uuid) => Ok(*uuid),
-            _ => Err(CompileError::InvalidOperand(
-                "hierarchy right operand must be an EntityRef".into(),
-            )),
-        }
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -547,57 +426,20 @@ impl<'a> BytecodeCompiler<'a> {
 mod tests {
     use super::*;
     use arbor_types::{
-        AttributeNameId, Condition, CompileWarning, EntityTypeId, IndexedEntity, Operand, OpCode,
+        AttributeNameId, Condition, EntityTypeId, Operand, OpCode, ResolvedEntityIndex,
         VariableRef, VariableScope,
     };
-    use std::collections::HashMap;
-    use uuid::Uuid;
-
-    // ── Mock resolver ────────────────────────────────────────────────────────
-
-    struct MockResolver {
-        map: HashMap<Uuid, u32>,
-    }
-
-    impl MockResolver {
-        fn new(entries: Vec<(Uuid, u32)>) -> Self {
-            Self { map: entries.into_iter().collect() }
-        }
-
-        fn empty() -> Self {
-            Self::new(vec![])
-        }
-    }
-
-    impl EntityResolver for MockResolver {
-        fn get_entity(&self, _: u32) -> Option<&IndexedEntity> {
-            None
-        }
-
-        fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32> {
-            self.map.get(uuid).copied()
-        }
-    }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     fn compile(condition: &Condition) -> Result<Vec<OpCode>, CompileError> {
-        let resolver = MockResolver::empty();
-        BytecodeCompiler::new(&resolver).compile(condition).map(|c| c.instructions)
-    }
-
-    fn compile_with(
-        condition: &Condition,
-        resolver: &MockResolver,
-    ) -> Result<Vec<OpCode>, CompileError> {
-        BytecodeCompiler::new(resolver).compile(condition).map(|c| c.instructions)
+        BytecodeCompiler::new().compile(condition).map(|c| c.instructions)
     }
 
     fn compile_full(
         condition: &Condition,
-        resolver: &MockResolver,
     ) -> Result<arbor_types::CompiledCondition, CompileError> {
-        BytecodeCompiler::new(resolver).compile(condition)
+        BytecodeCompiler::new().compile(condition)
     }
 
     fn attr(n: u32) -> AttributeNameId {
@@ -936,7 +778,7 @@ mod tests {
     #[test]
     fn has_attribute_invalid_entity_ref() {
         let err = compile(&Condition::HasAttribute(
-            Operand::EntityRef(Uuid::new_v4()),
+            Operand::EntityRef(5),
             attr(1),
         )).unwrap_err();
         assert!(matches!(err, CompileError::InvalidOperand(_)));
@@ -959,81 +801,44 @@ mod tests {
         assert_eq!(ops, vec![OpCode::IsType(VariableScope::Resource, tid)]);
     }
 
-    // ── 7. InHierarchy bare (empty path) ────────────────────────────────────
+    // ── 7. InHierarchy — bare variable (empty path) ──────────────────────────
 
     #[test]
     fn in_hierarchy_principal_bare() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 5)]);
-        let cond = Condition::InHierarchy(
-            principal_var(),
-            Operand::EntityRef(entity_uuid),
-        );
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::InHierarchy(VariableScope::Principal, 5)]);
+        // Variable with empty path + Direct index → single InHierarchy opcode.
+        let cond = Condition::InHierarchy(principal_var(), Operand::EntityRef(5));
+        let ops = compile(&cond).unwrap();
+        assert_eq!(ops, vec![OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var(VariableScope::Principal, &[])),
+            ResolvedEntityIndex::Direct(5),
+        )]);
     }
 
     #[test]
     fn in_hierarchy_resource_bare() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 99)]);
-        let cond = Condition::InHierarchy(
-            resource_var(),
-            Operand::EntityRef(entity_uuid),
-        );
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::InHierarchy(VariableScope::Resource, 99)]);
+        let cond = Condition::InHierarchy(resource_var(), Operand::EntityRef(99));
+        let ops = compile(&cond).unwrap();
+        assert_eq!(ops, vec![OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var(VariableScope::Resource, &[])),
+            ResolvedEntityIndex::Direct(99),
+        )]);
     }
 
     // ── 8. InHierarchy with path ─────────────────────────────────────────────
 
     #[test]
     fn in_hierarchy_var_with_path() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 12)]);
+        // Variable with a non-empty path → Variable descriptor preserves the path.
         let path_var = Operand::Variable(var(VariableScope::Principal, &[attr(1), attr(2)]));
-        let cond = Condition::InHierarchy(path_var, Operand::EntityRef(entity_uuid));
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![
-            OpCode::InHierarchyVar(
-                var(VariableScope::Principal, &[attr(1), attr(2)]),
-                12,
-            ),
-        ]);
+        let cond = Condition::InHierarchy(path_var, Operand::EntityRef(12));
+        let ops = compile(&cond).unwrap();
+        assert_eq!(ops, vec![OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var(VariableScope::Principal, &[attr(1), attr(2)])),
+            ResolvedEntityIndex::Direct(12),
+        )]);
     }
 
-    // ── 9. InHierarchy unresolved UUID ───────────────────────────────────────
-
-    #[test]
-    fn in_hierarchy_unresolved_uuid_compiles_to_false() {
-        // A policy may reference an entity that doesn't exist in the snapshot
-        // yet (e.g. written before the group was created). The compiler emits
-        // a constant `false` so the policy is still indexed and starts working
-        // the moment the entity appears in a future snapshot.
-        let unknown_uuid = Uuid::new_v4();
-        let resolver = MockResolver::empty();
-        let cond = Condition::InHierarchy(
-            principal_var(),
-            Operand::EntityRef(unknown_uuid),
-        );
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::PushBool(false)]);
-    }
-
-    #[test]
-    fn in_hierarchy_unresolved_uuid_produces_warning() {
-        let unknown_uuid = Uuid::new_v4();
-        let resolver = MockResolver::empty();
-        let cond = Condition::InHierarchy(
-            principal_var(),
-            Operand::EntityRef(unknown_uuid),
-        );
-        let compiled = compile_full(&cond, &resolver).unwrap();
-        assert_eq!(
-            compiled.warnings,
-            vec![CompileWarning::UnresolvedEntityRef(unknown_uuid)]
-        );
-    }
+    // ── 9. InHierarchy invalid operands ──────────────────────────────────────
 
     #[test]
     fn in_hierarchy_invalid_right_operand() {
@@ -1043,106 +848,9 @@ mod tests {
     }
 
     #[test]
-    fn in_hierarchy_context_scope_empty_path_is_error() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 1)]);
-        let cond = Condition::InHierarchy(
-            Operand::Variable(var(VariableScope::Context, &[])),
-            Operand::EntityRef(entity_uuid),
-        );
-        let err = compile_with(&cond, &resolver).unwrap_err();
-        assert!(matches!(err, CompileError::InvalidOperand(_)));
-    }
-
-    #[test]
     fn in_hierarchy_invalid_left_non_variable() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 1)]);
-        let cond = Condition::InHierarchy(scalar_int(1), Operand::EntityRef(entity_uuid));
-        let err = compile_with(&cond, &resolver).unwrap_err();
-        assert!(matches!(err, CompileError::InvalidOperand(_)));
-    }
-
-    // ── 10. ContainsInHierarchy ──────────────────────────────────────────────
-
-    #[test]
-    fn contains_in_hierarchy_variable() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 7)]);
-        let path_var = Operand::Variable(var(VariableScope::Principal, &[attr(3)]));
-        let cond = Condition::ContainsInHierarchy(path_var, Operand::EntityRef(entity_uuid));
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![
-            OpCode::PushVariable(var(VariableScope::Principal, &[attr(3)])),
-            OpCode::ContainsInHierarchy(7),
-        ]);
-    }
-
-    #[test]
-    fn contains_in_hierarchy_set_literal() {
-        let entity_uuid = Uuid::new_v4();
-        let uuid1 = Uuid::new_v4();
-        let uuid2 = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 3)]);
-        let set = Operand::Set(vec![
-            Operand::EntityRef(uuid1),
-            Operand::EntityRef(uuid2),
-        ]);
-        let cond = Condition::ContainsInHierarchy(set, Operand::EntityRef(entity_uuid));
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops.len(), 2);
-        assert!(matches!(ops[0], OpCode::PushSet(_)));
-        assert_eq!(ops[1], OpCode::ContainsInHierarchy(3));
-    }
-
-    #[test]
-    fn contains_in_hierarchy_unresolved_uuid_compiles_to_false() {
-        let unknown = Uuid::new_v4();
-        let resolver = MockResolver::empty();
-        let cond = Condition::ContainsInHierarchy(
-            principal_var(),
-            Operand::EntityRef(unknown),
-        );
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![OpCode::PushBool(false)]);
-    }
-
-    #[test]
-    fn contains_in_hierarchy_unresolved_uuid_produces_warning() {
-        let unknown = Uuid::new_v4();
-        let resolver = MockResolver::empty();
-        let cond = Condition::ContainsInHierarchy(
-            principal_var(),
-            Operand::EntityRef(unknown),
-        );
-        let compiled = compile_full(&cond, &resolver).unwrap();
-        assert_eq!(
-            compiled.warnings,
-            vec![CompileWarning::UnresolvedEntityRef(unknown)]
-        );
-    }
-
-    #[test]
-    fn resolved_hierarchy_has_no_warnings() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 7)]);
-        let cond = Condition::InHierarchy(
-            principal_var(),
-            Operand::EntityRef(entity_uuid),
-        );
-        let compiled = compile_full(&cond, &resolver).unwrap();
-        assert!(compiled.warnings.is_empty());
-    }
-
-    #[test]
-    fn contains_in_hierarchy_invalid_scalar_left() {
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 1)]);
-        let cond = Condition::ContainsInHierarchy(
-            scalar_int(1),
-            Operand::EntityRef(entity_uuid),
-        );
-        let err = compile_with(&cond, &resolver).unwrap_err();
+        let cond = Condition::InHierarchy(scalar_int(1), Operand::EntityRef(1));
+        let err = compile(&cond).unwrap_err();
         assert!(matches!(err, CompileError::InvalidOperand(_)));
     }
 
@@ -1258,8 +966,7 @@ mod tests {
     fn dependencies_single_variable() {
         let v = var(VariableScope::Principal, &[attr(1)]);
         let cond = Condition::Eq(Operand::Variable(v.clone()), scalar_int(0));
-        let resolver = MockResolver::empty();
-        let compiled = compile_full(&cond, &resolver).unwrap();
+        let compiled = compile_full(&cond).unwrap();
         assert_eq!(compiled.dependencies, vec![v]);
     }
 
@@ -1273,8 +980,7 @@ mod tests {
             Condition::Eq(Operand::Variable(v1.clone()), scalar_int(1)),
             Condition::Eq(Operand::Variable(v2.clone()), scalar_int(2)),
         ]);
-        let resolver = MockResolver::empty();
-        let compiled = compile_full(&cond, &resolver).unwrap();
+        let compiled = compile_full(&cond).unwrap();
         // Sorted + deduped.
         let mut expected = vec![v1, v2];
         expected.sort();
@@ -1284,8 +990,7 @@ mod tests {
     #[test]
     fn dependencies_no_variables() {
         let cond = Condition::Eq(scalar_int(1), scalar_int(2));
-        let resolver = MockResolver::empty();
-        let compiled = compile_full(&cond, &resolver).unwrap();
+        let compiled = compile_full(&cond).unwrap();
         assert!(compiled.dependencies.is_empty());
     }
 
@@ -1293,8 +998,7 @@ mod tests {
     fn dependencies_from_is_type_empty() {
         // IsType has no operands — no variable dependencies.
         let cond = Condition::IsType(VariableScope::Principal, type_id(1));
-        let resolver = MockResolver::empty();
-        let compiled = compile_full(&cond, &resolver).unwrap();
+        let compiled = compile_full(&cond).unwrap();
         assert!(compiled.dependencies.is_empty());
     }
 
@@ -1324,8 +1028,7 @@ mod tests {
 
     #[test]
     fn bare_entity_ref_operand() {
-        let uuid = Uuid::new_v4();
-        let cond = Condition::Operand(Operand::EntityRef(uuid));
+        let cond = Condition::Operand(Operand::EntityRef(5));
         let err = compile(&cond).unwrap_err();
         assert_eq!(err, CompileError::InvalidOperand("Bare operand in Condition must be Bool".into()));
     }
@@ -1333,29 +1036,23 @@ mod tests {
     // ── Additional edge cases ────────────────────────────────────────────────
 
     #[test]
-    fn in_hierarchy_var_context_scope_with_path_is_allowed() {
-        // Context scope with a non-empty path uses InHierarchyVar — this is valid
-        // because InHierarchyVar resolves the entity from an attribute, not from
-        // the context entity slot directly.
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 42)]);
+    fn in_hierarchy_context_scope_with_path_compiles() {
+        // Context scope with a non-empty path is valid at compile time.
+        // The VM will evaluate it at runtime.
         let ctx_var = Operand::Variable(var(VariableScope::Context, &[attr(1)]));
-        let cond = Condition::InHierarchy(ctx_var, Operand::EntityRef(entity_uuid));
-        let ops = compile_with(&cond, &resolver).unwrap();
-        assert_eq!(ops, vec![
-            OpCode::InHierarchyVar(var(VariableScope::Context, &[attr(1)]), 42),
-        ]);
+        let cond = Condition::InHierarchy(ctx_var, Operand::EntityRef(42));
+        let ops = compile(&cond).unwrap();
+        assert_eq!(ops, vec![OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var(VariableScope::Context, &[attr(1)])),
+            ResolvedEntityIndex::Direct(42),
+        )]);
     }
 
     #[test]
     fn compile_full_instructions_and_dependencies() {
         // Full integration: And of two conditions with distinct variable refs.
-        // v_principal has a path (attribute lookup), v_resource is root scope
-        // (empty path) so InHierarchy is emitted instead of InHierarchyVar.
         let v_principal = var(VariableScope::Principal, &[attr(1)]);
         let v_resource_root = var(VariableScope::Resource, &[]);
-        let entity_uuid = Uuid::new_v4();
-        let resolver = MockResolver::new(vec![(entity_uuid, 0)]);
 
         let cond = Condition::And(vec![
             Condition::Eq(
@@ -1364,27 +1061,25 @@ mod tests {
             ),
             Condition::InHierarchy(
                 Operand::Variable(v_resource_root.clone()),
-                Operand::EntityRef(entity_uuid),
+                Operand::EntityRef(0),
             ),
         ]);
 
-        let compiled = compile_full(&cond, &resolver).unwrap();
+        let compiled = compile_full(&cond).unwrap();
 
-        // Instructions: PushVariable, PushScalar, Eq, JumpIfFalse(6), InHierarchy(bare), Jump(7), PushScalar(Bool(false))
         assert_eq!(compiled.instructions, vec![
             OpCode::PushVariable(v_principal.clone()),
             OpCode::PushString("alice".into()),
             OpCode::Eq,
             OpCode::JumpIfFalse(6),
-            // Root-scope resource with empty path → InHierarchy (no PushVariable).
-            OpCode::InHierarchy(VariableScope::Resource, 0),
+            OpCode::InHierarchy(
+                ResolvedEntityIndex::Variable(v_resource_root.clone()),
+                ResolvedEntityIndex::Direct(0),
+            ),
             OpCode::Jump(7),
             OpCode::PushBool(false),
         ]);
 
-        // v_principal is a dependency; v_resource_root has empty path and is
-        // used only in InHierarchy (no stack push) — but compute_dependencies
-        // still records it as a VariableRef dependency.
         let mut expected_deps = vec![v_principal, v_resource_root];
         expected_deps.sort();
         assert_eq!(compiled.dependencies, expected_deps);

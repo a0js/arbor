@@ -2,10 +2,15 @@ use ipnet::IpNet;
 use std::net::IpAddr;
 use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
-use uuid::Uuid;
 use crate::attributes::AttributeValue;
 use crate::conditions::{VariableRef, VariableScope};
 use crate::ids::EntityTypeId;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedEntityIndex {
+    Variable(VariableRef),
+    Direct(u32),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpCode {
@@ -17,7 +22,7 @@ pub enum OpCode {
     PushBool(bool),
     PushIpAddr(IpAddr),
     PushIpNetwork(IpNet),
-    PushEntityRef(Uuid),
+    PushEntityRef(u32),
     /// Push the value at the given attribute path onto the stack.
     /// Pushes StackValue::Missing if the path does not exist.
     /// Must always be consumed by a comparison or set opcode — never by And/Or/Not.
@@ -65,19 +70,7 @@ pub enum OpCode {
     ///
     /// Self-inclusive: the snapshot builder guarantees that each entity's own
     /// index is present in its `ancestors` bitmap, so `entity in entity` is true.
-    InHierarchy(VariableScope, u32),
-
-    /// Hierarchy membership check where the entity to test is stored as an
-    /// attribute on the principal or resource (e.g., `principal.manager in AdminGroup`).
-    ///
-    /// No stack operands. The VM resolves `var_ref` to an `AttributeValue::EntityRef`,
-    /// uses the `EntityResolver` in `EvaluationContext` to look up that entity in the
-    /// snapshot, then checks its `ancestors` bitmap for `target_idx`.
-    ///
-    /// Missing attribute or unresolvable UUID → `false`.
-    /// Wrong attribute type → `Invalid`.
-    /// No `EntityResolver` in context → `Invalid`.
-    InHierarchyVar(VariableRef, u32),
+    InHierarchy(ResolvedEntityIndex, ResolvedEntityIndex),
 
     /// IP-in-network membership check.
     ///
@@ -88,48 +81,14 @@ pub enum OpCode {
     /// Wrong types → Invalid.
     InNetwork,
 
-    /// Set membership with hierarchy expansion.
-    ///
-    /// Stack: `[..., set]` → `[..., bool]`
-    ///
-    /// Pops a set of `EntityRef`s from the stack and checks whether ANY element
-    /// is the target or a descendant of it. `target_idx` is the pre-resolved
-    /// snapshot index of the target ancestor (compiler resolves UUID → u32).
-    ///
-    /// Missing set → `false`. Non-EntityRef element in set → `Invalid`.
-    /// Unresolvable UUID in set → skipped (treated as not in hierarchy).
-    /// No `EntityResolver` in context → `Invalid`.
-    ContainsInHierarchy(u32),
-
     // Control flow (not yet implemented)
     JumpIfFalse(u32),
     JumpIfTrue(u32),
     Jump(u32),
 }
 
-/// A non-fatal issue encountered while compiling a condition.
-///
-/// Warnings do not prevent the condition from being used; the compiler always
-/// produces valid bytecode even when warnings are present. Callers should
-/// surface warnings to policy authors so they can investigate and fix the
-/// underlying cause.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompileWarning {
-    /// A hierarchy condition referenced an entity UUID that was not present in
-    /// the snapshot at compile time. The condition compiled to a constant
-    /// `false` for this snapshot; it will evaluate correctly once the entity
-    /// appears in a future snapshot.
-    ///
-    /// Common cause: the policy was written before the referenced entity was
-    /// created, or the entity was deleted.
-    UnresolvedEntityRef(Uuid),
-}
-
 #[derive(Debug, Clone)]
 pub struct CompiledCondition {
     pub instructions: Vec<OpCode>,
     pub dependencies: Vec<VariableRef>,
-    /// Non-fatal issues encountered during compilation. Empty when the
-    /// condition compiled without any degradation.
-    pub warnings: Vec<CompileWarning>,
 }

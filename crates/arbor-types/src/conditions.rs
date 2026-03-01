@@ -6,7 +6,6 @@ use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
 use crate::attributes::AttributeValue;
 use crate::ids::{AttributeNameId, EntityTypeId};
-use uuid::Uuid;
 
 /// Policy Condition Operand types
 #[derive(Debug, Clone, PartialEq)]
@@ -20,7 +19,7 @@ pub enum Operand {
     IpAddr(IpAddr),
     IpNetwork(IpNet),
     // References and variables
-    EntityRef(Uuid),
+    EntityRef(u32),
     Set(Vec<Operand>),
     Variable(VariableRef),
 }
@@ -68,15 +67,6 @@ pub enum Condition {
     /// each entity's own index in its `ancestors` bitmap.
     InHierarchy(Operand, Operand),
 
-    /// Set membership with hierarchy expansion (e.g., `principal.groups containsInHierarchy Group::"admins"`).
-    ///
-    /// Left operand is a set of EntityRefs (e.g., an attribute holding a list of group memberships).
-    /// Right operand is an EntityRef (UUID) representing the target ancestor.
-    /// The compiler resolves the right UUID to a snapshot index before emitting the opcode.
-    ///
-    /// Semantics: true if ANY element in the set is the target or a descendant of it.
-    ContainsInHierarchy(Operand, Operand),
-
     InNetwork(Operand, Operand), // e.g., ip() IN network — V2
 }
 
@@ -102,8 +92,7 @@ impl Condition {
             | Condition::ContainsAll(l, r) | Condition::ContainsAny(l, r)
             | Condition::StartsWith(l, r) | Condition::EndsWith(l, r)
             | Condition::StringContains(l, r) | Condition::Like(l, r)
-            | Condition::InHierarchy(l, r) | Condition::ContainsInHierarchy(l, r)
-            | Condition::InNetwork(l, r) => {
+            | Condition::InHierarchy(l, r) | Condition::InNetwork(l, r) => {
                 Self::find_operand_dependencies(l, deps);
                 Self::find_operand_dependencies(r, deps);
             }

@@ -1,22 +1,16 @@
 //! Types for condition evaluation
 
-use uuid::Uuid;
 use crate::entities::IndexedEntity;
 use crate::attributes::Attributes;
 
-/// Allows the bytecode VM to look up arbitrary entities by index or UUID.
+/// Allows the bytecode VM to look up entities by their snapshot index.
 ///
 /// Implemented by `Snapshot` in `arbor-index-snapshot`. The trait lives in
 /// `arbor-types` to avoid a circular dependency (`arbor-index-snapshot` already
 /// depends on `arbor-types`).
-///
-/// Required for `InHierarchyVar`, which resolves an entity ref stored as an
-/// attribute value and checks its ancestry in the snapshot.
 pub trait EntityResolver {
     /// Look up an `IndexedEntity` by its snapshot index.
     fn get_entity(&self, index: u32) -> Option<&IndexedEntity>;
-    /// Resolve a UUID to its snapshot index.
-    fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32>;
 }
 
 /// Result of evaluating a condition
@@ -58,7 +52,7 @@ pub struct EvaluationContext<'a> {
     /// Entity resolver for looking up arbitrary entities by index or UUID.
     /// Required when evaluating `InHierarchyVar`. None in contexts where
     /// sub-entity hierarchy checks are not needed (e.g., unit tests).
-    pub entities: Option<&'a dyn EntityResolver>,
+    pub entities: &'a dyn EntityResolver,
 }
 
 impl<'a> EvaluationContext<'a> {
@@ -66,13 +60,8 @@ impl<'a> EvaluationContext<'a> {
         principal: &'a IndexedEntity,
         resource: &'a IndexedEntity,
         context_attrs: Option<&'a Attributes>,
+        entities: &'a dyn EntityResolver,
     ) -> Self {
-        Self { principal, resource, context_attrs, entities: None }
-    }
-
-    /// Attach an entity resolver, enabling `InHierarchyVar` evaluation.
-    pub fn with_entities(mut self, entities: &'a dyn EntityResolver) -> Self {
-        self.entities = Some(entities);
-        self
+        Self { principal, resource, context_attrs, entities }
     }
 }

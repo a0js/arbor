@@ -2,14 +2,17 @@ use std::ops::Sub;
 use rapidhash::RapidHashMap;
 use roaring::{MultiOps, RoaringBitmap};
 use uuid::Uuid;
-use arbor_types::{EntityResolver, EntityTypeId, IndexedPolicyTarget, IndexedEntity, IndexedPolicy, IndexedEntityType, ArborError, ArborResult};
+use arbor_types::{
+    EntityResolver, EntityTypeId, IndexedEntity, IndexedEntityType, IndexedNode, IndexedPolicy,
+    IndexedPolicyTarget, ArborError, ArborResult,
+};
 
 pub struct Snapshot {
     pub uuid_to_index: RapidHashMap<Uuid, u32>,
     pub index_to_uuid: Vec<Option<Uuid>>,
 
-    pub indexed_entities: RapidHashMap<u32, IndexedEntity>,
-    pub indexed_policies: RapidHashMap<u32, IndexedPolicy>,
+    pub nodes: Vec<IndexedNode>,
+
     pub action_to_policies: RapidHashMap<u32, RoaringBitmap>,
     pub indexed_entity_types: RapidHashMap<EntityTypeId, IndexedEntityType>,
 
@@ -32,7 +35,7 @@ impl Snapshot {
         Self {
             uuid_to_index: RapidHashMap::default(),
             index_to_uuid: Vec::new(),
-            indexed_entities: RapidHashMap::default(),
+            nodes: Vec::new(),
             indexed_entity_types: RapidHashMap::default(),
             all_principal_policies: RoaringBitmap::new(),
             all_resource_policies: RoaringBitmap::new(),
@@ -40,157 +43,157 @@ impl Snapshot {
             forbidding_policies: RoaringBitmap::new(),
             descendant_principal_policies: RoaringBitmap::new(),
             descendant_resource_policies: RoaringBitmap::new(),
-            indexed_policies: RapidHashMap::default(),
             action_to_policies: RapidHashMap::default(),
         }
     }
-    pub fn get_policies_for_resource(&self, resource_bit: u32) -> ArborResult<RoaringBitmap> {
-        let resource = self.indexed_entities.get(&resource_bit).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", resource_bit)))?;
+
+    pub fn get_entity(&self, idx: u32) -> Option<&IndexedEntity> {
+        match self.nodes.get(idx as usize)? {
+            IndexedNode::Entity(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn get_policy(&self, idx: u32) -> Option<&IndexedPolicy> {
+        match self.nodes.get(idx as usize)? {
+            IndexedNode::Policy(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn get_policies_for_resource(&self, resource_idx: u32) -> ArborResult<RoaringBitmap> {
+        let resource = self.get_entity(resource_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", resource_idx)))?;
         let mut policies = vec![&self.all_resource_policies];
 
-        if let Some(direct_resource_policies) = &resource.resource_of_policies {
-            policies.push(direct_resource_policies)
+        if let Some(direct) = &resource.resource_of_policies {
+            policies.push(direct);
         }
 
-        let ancestral_related_policies = resource.ancestors.iter()
-            .filter_map(|ancestor_idx| {
-                self.indexed_entities.get(&ancestor_idx)
-                    .and_then(|ancestor| ancestor.resource_of_policies.as_ref())
+        let ancestral = resource.ancestors.iter()
+            .filter_map(|anc_idx| {
+                self.get_entity(anc_idx)
+                    .and_then(|e| e.resource_of_policies.as_ref())
             })
             .collect::<Vec<_>>()
             .union() & &self.descendant_resource_policies;
 
-        policies.push(&ancestral_related_policies);
+        policies.push(&ancestral);
 
-        if let Some(entity_type) = self.indexed_entity_types.get(&resource.entity_type) {
-            policies.push(&entity_type.policies_targeting_resources_of_type)
-        };
+        if let Some(et) = self.indexed_entity_types.get(&resource.entity_type) {
+            policies.push(&et.policies_targeting_resources_of_type);
+        }
 
         Ok(policies.union())
     }
 
-    pub fn get_policies_for_principal(&self, principal_bit: u32) -> ArborResult<RoaringBitmap> {
-        let principal = self.indexed_entities.get(&principal_bit).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", principal_bit)))?;
+    pub fn get_policies_for_principal(&self, principal_idx: u32) -> ArborResult<RoaringBitmap> {
+        let principal = self.get_entity(principal_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", principal_idx)))?;
         let mut policies = vec![&self.all_principal_policies];
 
-        if let Some(direct_principal_policies) = &principal.principal_of_policies {
-            policies.push(direct_principal_policies)
+        if let Some(direct) = &principal.principal_of_policies {
+            policies.push(direct);
         }
 
-        let ancestral_related_policies = principal.ancestors.iter()
-            .filter_map(|ancestor_idx| {
-                self.indexed_entities.get(&ancestor_idx)
-                    .and_then(|ancestor| ancestor.principal_of_policies.as_ref())
+        let ancestral = principal.ancestors.iter()
+            .filter_map(|anc_idx| {
+                self.get_entity(anc_idx)
+                    .and_then(|e| e.principal_of_policies.as_ref())
             })
             .collect::<Vec<_>>()
             .union() & &self.descendant_principal_policies;
 
-        policies.push(&ancestral_related_policies);
+        policies.push(&ancestral);
 
-        if let Some(entity_type) = self.indexed_entity_types.get(&principal.entity_type) {
-            policies.push(&entity_type.policies_targeting_principals_of_type)
-        };
+        if let Some(et) = self.indexed_entity_types.get(&principal.entity_type) {
+            policies.push(&et.policies_targeting_principals_of_type);
+        }
 
         Ok(policies.union())
     }
 
-    pub fn get_policies_for_action(&self, action_bit: u32) -> ArborResult<RoaringBitmap> {
-        let policies = self.action_to_policies.get(&action_bit).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", action_bit)))?;
-        Ok(policies.clone())
+    pub fn get_policies_for_action(&self, action_idx: u32) -> ArborResult<RoaringBitmap> {
+        self.action_to_policies
+            .get(&action_idx)
+            .cloned()
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Action not found {}", action_idx)))
     }
 
-    pub fn get_principals_of_type_for_policy(&self, policy_idx: u32, entity_type_id: EntityTypeId) -> ArborResult<RoaringBitmap> {
-        let policy = self.indexed_policies.get(&policy_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", policy_idx)))?;
-        let entity_type = self.indexed_entity_types.get(&entity_type_id).ok_or_else(|| ArborError::EntityNotFound(format!("Entity Type not found {:?}", entity_type_id)))?;
+    pub fn get_principals_of_type_for_policy(
+        &self,
+        policy_idx: u32,
+        entity_type_id: EntityTypeId,
+    ) -> ArborResult<RoaringBitmap> {
+        let policy = self.get_policy(policy_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Policy not found {}", policy_idx)))?;
+        let et = self.indexed_entity_types.get(&entity_type_id)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity type not found {:?}", entity_type_id)))?;
         match policy.principal_target {
-            IndexedPolicyTarget::Entity(entity_idx) => {
-                if entity_type.nodes_of_type.contains(entity_idx) {
-                    Ok(RoaringBitmap::from([entity_idx]))
-                } else {
-                    Ok(RoaringBitmap::default())
-                }
-            },
-            IndexedPolicyTarget::EntityWithDescendants(entity_idx) => {
-                let entity = self.indexed_entities.get(&entity_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", entity_idx)))?;
-                Ok(&entity_type.nodes_of_type & &entity.descendants)
-            },
-            IndexedPolicyTarget::EntityType(policy_entity_type_id) => {
-                if policy_entity_type_id == entity_type_id {
-                    Ok(entity_type.nodes_of_type.clone())
-                } else {
-                    Ok(RoaringBitmap::default())
-                }
-            },
-            IndexedPolicyTarget::All => {
-                Ok(entity_type.nodes_of_type.clone())
+            IndexedPolicyTarget::Entity(idx) => {
+                Ok(if et.nodes_of_type.contains(idx) { RoaringBitmap::from([idx]) } else { RoaringBitmap::new() })
             }
-
+            IndexedPolicyTarget::EntityWithDescendants(idx) => {
+                let e = self.get_entity(idx)
+                    .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", idx)))?;
+                Ok(&et.nodes_of_type & &e.descendants)
+            }
+            IndexedPolicyTarget::EntityType(tid) => {
+                Ok(if tid == entity_type_id { et.nodes_of_type.clone() } else { RoaringBitmap::new() })
+            }
+            IndexedPolicyTarget::All => Ok(et.nodes_of_type.clone()),
         }
     }
 
-    pub fn get_resources_of_type_for_policy(&self, policy_idx: u32, entity_type_id: EntityTypeId) -> ArborResult<RoaringBitmap> {
-        let policy = self.indexed_policies.get(&policy_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", policy_idx)))?;
-        let entity_type = self.indexed_entity_types.get(&entity_type_id).ok_or_else(|| ArborError::EntityNotFound(format!("Entity Type not found {:?}", entity_type_id)))?;
+    pub fn get_resources_of_type_for_policy(
+        &self,
+        policy_idx: u32,
+        entity_type_id: EntityTypeId,
+    ) -> ArborResult<RoaringBitmap> {
+        let policy = self.get_policy(policy_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Policy not found {}", policy_idx)))?;
+        let et = self.indexed_entity_types.get(&entity_type_id)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity type not found {:?}", entity_type_id)))?;
         match policy.resource_target {
-            IndexedPolicyTarget::Entity(entity_idx) => {
-                if entity_type.nodes_of_type.contains(entity_idx) {
-                    Ok(RoaringBitmap::from([entity_idx]))
-                } else {
-                    Ok(RoaringBitmap::default())
-                }
-            },
-            IndexedPolicyTarget::EntityWithDescendants(entity_idx) => {
-                let entity = self.indexed_entities.get(&entity_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", entity_idx)))?;
-                Ok(&entity_type.nodes_of_type & &entity.descendants)
-            },
-            IndexedPolicyTarget::EntityType(policy_entity_type_id) => {
-                if policy_entity_type_id == entity_type_id {
-                    Ok(entity_type.nodes_of_type.clone())
-                } else {
-                    Ok(RoaringBitmap::default())
-                }
-            },
-            IndexedPolicyTarget::All => {
-                Ok(entity_type.nodes_of_type.clone())
+            IndexedPolicyTarget::Entity(idx) => {
+                Ok(if et.nodes_of_type.contains(idx) { RoaringBitmap::from([idx]) } else { RoaringBitmap::new() })
             }
-
+            IndexedPolicyTarget::EntityWithDescendants(idx) => {
+                let e = self.get_entity(idx)
+                    .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", idx)))?;
+                Ok(&et.nodes_of_type & &e.descendants)
+            }
+            IndexedPolicyTarget::EntityType(tid) => {
+                Ok(if tid == entity_type_id { et.nodes_of_type.clone() } else { RoaringBitmap::new() })
+            }
+            IndexedPolicyTarget::All => Ok(et.nodes_of_type.clone()),
         }
     }
 
     pub fn get_actions_for_policy(&self, policy_idx: u32) -> ArborResult<RoaringBitmap> {
-        let policy = self.indexed_policies.get(&policy_idx).ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", policy_idx)))?;
-        Ok(policy.actions.clone())
+        self.get_policy(policy_idx)
+            .map(|p| p.actions.clone())
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Policy not found {}", policy_idx)))
+    }
+
+    pub fn split_policy_map_for_authorization(
+        &self,
+        policy_bitmap: &RoaringBitmap,
+    ) -> (RoaringBitmap, RoaringBitmap, RoaringBitmap, RoaringBitmap) {
+        let conditional = policy_bitmap & &self.conditional_policies;
+        let unconditional = policy_bitmap.sub(&self.conditional_policies);
+
+        let unconditional_forbidding = &unconditional & &self.forbidding_policies;
+        let conditional_forbidding   = &conditional  & &self.forbidding_policies;
+        let unconditional_permitting = unconditional.sub(&self.forbidding_policies);
+        let conditional_permitting   = conditional.sub(&self.forbidding_policies);
+
+        (unconditional_forbidding, conditional_forbidding, unconditional_permitting, conditional_permitting)
     }
 }
 
 impl EntityResolver for Snapshot {
     fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
-        self.indexed_entities.get(&index)
-    }
-
-    fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32> {
-        self.uuid_to_index.get(uuid).copied()
-    }
-}
-
-impl Snapshot {
-    pub fn split_policy_map_for_authorization(
-        &self,
-        policy_bitmap: &RoaringBitmap,
-    ) -> (RoaringBitmap, RoaringBitmap, RoaringBitmap, RoaringBitmap) {
-        let conditional_policies = policy_bitmap & &self.conditional_policies;
-        let unconditional_policies = policy_bitmap.sub(&self.conditional_policies);
-
-        let unconditional_forbidding = &unconditional_policies & &self.forbidding_policies;
-        let conditional_forbidding = &conditional_policies & &self.forbidding_policies;
-        let unconditional_permitting = unconditional_policies.sub(&self.forbidding_policies);
-        let conditional_permitting = conditional_policies.sub(&self.forbidding_policies);
-
-        (
-            unconditional_forbidding,
-            conditional_forbidding,
-            unconditional_permitting,
-            conditional_permitting,
-        )
+        self.get_entity(index)
     }
 }

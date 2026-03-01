@@ -34,6 +34,7 @@ impl PolicyTarget {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum IndexedPolicyTarget {
     Entity(u32),
     EntityWithDescendants(u32),
@@ -89,7 +90,9 @@ impl Policy {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct IndexedPolicy {
+    pub idx: u32,
     pub principal_target: IndexedPolicyTarget,
     pub resource_target: IndexedPolicyTarget,
     pub actions: RoaringBitmap,

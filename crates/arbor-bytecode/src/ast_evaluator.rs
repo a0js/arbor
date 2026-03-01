@@ -4,7 +4,6 @@ use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use std::net::IpAddr;
-use uuid::Uuid;
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,7 +13,7 @@ enum Val {
     Timestamp(DateTime<Utc>),
     String(String),
     Bool(bool),
-    EntityRef(Uuid),
+    EntityRef(u32),
     IpAddr(IpAddr),
     IpNetwork(IpNet),
     Set(Vec<AttributeValue>),
@@ -316,65 +315,20 @@ fn eval_cond(condition: &Condition, context: &EvaluationContext) -> Result<bool,
         Condition::InHierarchy(left, right) => {
             let lv = eval_operand(left, context)?;
             let rv = eval_operand(right, context)?;
-            let target_uuid = match rv {
-                Val::EntityRef(u) => u,
+            let target_idx = match rv {
+                Val::EntityRef(idx) => idx,
                 Val::Missing => return Ok(false),
                 _ => return Err(EvaluationError::ExecutionError("InHierarchy requires EntityRef right".into())),
             };
-            
-            let resolver = context.entities.ok_or_else(|| EvaluationError::ExecutionError("No EntityResolver".into()))?;
-            let target_idx = resolver.resolve_uuid(&target_uuid);
-            
-            let entity_uuid = match lv {
-                Val::EntityRef(u) => u,
+            let entity_idx = match lv {
+                Val::EntityRef(idx) => idx,
                 Val::Missing => return Ok(false),
                 _ => return Err(EvaluationError::ExecutionError("InHierarchy requires EntityRef left".into())),
             };
-
-            let entity_idx = resolver.resolve_uuid(&entity_uuid);
-            let entity = entity_idx.and_then(|idx| resolver.get_entity(idx));
-            
-            if let (Some(t_idx), Some(e)) = (target_idx, entity) {
-                Ok(e.ancestors.contains(t_idx))
-            } else {
-                Ok(false)
+            match context.entities.get_entity(entity_idx) {
+                Some(entity) => Ok(entity.ancestors.contains(target_idx)),
+                None => Ok(false),
             }
-        }
-
-        Condition::ContainsInHierarchy(left, right) => {
-            let lv = eval_operand(left, context)?;
-            let rv = eval_operand(right, context)?;
-            let target_uuid = match rv {
-                Val::EntityRef(u) => u,
-                Val::Missing => return Ok(false),
-                _ => return Err(EvaluationError::ExecutionError("ContainsInHierarchy requires EntityRef right".into())),
-            };
-            
-            let resolver = context.entities.ok_or_else(|| EvaluationError::ExecutionError("No EntityResolver".into()))?;
-            let target_idx = resolver.resolve_uuid(&target_uuid);
-            
-            let set = match lv {
-                Val::Set(s) => s,
-                Val::Missing => return Ok(false),
-                _ => return Err(EvaluationError::ExecutionError("ContainsInHierarchy requires Set left".into())),
-            };
-
-            if let Some(t_idx) = target_idx {
-                for item in set {
-                    if let AttributeValue::EntityRef(u) = item {
-                        if let Some(e_idx) = resolver.resolve_uuid(&u) {
-                            if let Some(entity) = resolver.get_entity(e_idx) {
-                                if entity.ancestors.contains(t_idx) {
-                                    return Ok(true);
-                                }
-                            }
-                        }
-                    } else {
-                        return Err(EvaluationError::ExecutionError("ContainsInHierarchy set element must be EntityRef".into()));
-                    }
-                }
-            }
-            Ok(false)
         }
 
         Condition::InNetwork(ip_op, net_op) => {

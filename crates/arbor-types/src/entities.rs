@@ -1,5 +1,6 @@
 use crate::attributes::{AttributeValue, Attributes};
 use crate::ids::{AttributeNameId, EntityTypeId};
+use crate::policies::IndexedPolicy;
 use std::hash::Hash;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
@@ -63,8 +64,9 @@ impl Entity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexedEntity {
+    pub idx: u32,
     pub attributes: Attributes,
     pub entity_type: EntityTypeId,
     pub descendants: RoaringBitmap,
@@ -77,4 +79,11 @@ pub struct IndexedEntityType {
     pub nodes_of_type: RoaringBitmap,
     pub policies_targeting_principals_of_type: RoaringBitmap,
     pub policies_targeting_resources_of_type: RoaringBitmap,
+}
+
+#[derive(Debug)]
+pub enum IndexedNode {
+    Entity(IndexedEntity),
+    Policy(IndexedPolicy),
+    Other,
 }

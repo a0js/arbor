@@ -6,6 +6,11 @@ edition = "2024"
 [dependencies]
 arbor-types = { path = "../../crates/arbor-types" }
 arbor-graph-core = { path = "../../crates/arbor-graph-core" }
+arbor-index-snapshot = { path = "../../crates/arbor-index-snapshot" }
+arbor-bytecode = { path = "../../crates/arbor-bytecode" }
 uuid = { version = "1.18.1", features = ["v4"] }
 roaring = "0.11.2"
 rapidhash = "4.1.1"
+
+[dev-dependencies]
+ipnet = "2.11.0"

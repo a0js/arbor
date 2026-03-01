@@ -1,235 +1,129 @@
-use std::collections::{HashMap, HashSet};
-use arbor_types::ArborResult;
-use arbor_graph_core::graph::Graph;
+use rapidhash::RapidHashMap;
 use roaring::RoaringBitmap;
-use uuid::Uuid;
+use std::collections::HashSet;
 
+/// Compute all transitive ancestors of `entity_idx` by following `parents`.
+///
+/// The entity itself is NOT included — callers add it when self-inclusion is
+/// required (the snapshot builder inserts the entity's own index into the
+/// returned bitmap before storing it).
+///
+/// Circular dependencies are impossible here: the graph validates acyclicity
+/// on every `upsert_entity` call, so the `visited` check via bitmap insertion
+/// is only needed to handle shared ancestors in DAG (diamond) patterns.
 pub fn compute_ancestors(
-    graph: &Graph,
-    entity_uuid: Uuid,
-    parents_map: &HashMap<Uuid, Vec<Uuid>>,
-) -> ArborResult<RoaringBitmap> {
+    parents: &RapidHashMap<u32, HashSet<u32>>,
+    entity_idx: u32,
+) -> RoaringBitmap {
     let mut ancestors = RoaringBitmap::new();
-    let mut visited = HashSet::new();
-    let mut path = HashSet::new();
+    let mut stack = vec![entity_idx];
 
-    dfs_reachability(
-        graph,
-        &entity_uuid,
-        parents_map,
-        &mut visited,
-        &mut path,
-        &mut ancestors,
-    )?;
-
-    Ok(ancestors)
-}
-
-pub fn compute_descendants(
-    graph: &Graph,
-    entity_uuid: Uuid,
-    children_map: &HashMap<Uuid, Vec<Uuid>>,
-) -> ArborResult<RoaringBitmap> {
-    let mut descendants = RoaringBitmap::new();
-    let mut visited = HashSet::new();
-    let mut path = HashSet::new();
-
-    dfs_reachability(
-        graph,
-        &entity_uuid,
-        children_map,
-        &mut visited,
-        &mut path,
-        &mut descendants,
-    )?;
-
-    Ok(descendants)
-}
-
-fn dfs_reachability(
-    graph: &Graph,
-    current_uuid: &Uuid,
-    adjacency_map: &HashMap<Uuid, Vec<Uuid>>,
-    visited: &mut HashSet<Uuid>,
-    path: &mut HashSet<Uuid>,
-    results: &mut RoaringBitmap,
-) -> ArborResult<()> {
-    if path.contains(current_uuid) {
-        return Err(arbor_types::ArborError::CircularDependency(format!(
-            "Circular dependency detected at entity {}",
-            current_uuid
-        )));
-    }
-
-    if visited.contains(current_uuid) {
-        return Ok(());
-    }
-
-    visited.insert(*current_uuid);
-    path.insert(*current_uuid);
-
-    if let Some(neighbors) = adjacency_map.get(current_uuid) {
-        for neighbor_uuid in neighbors {
-            if let Some(&index) = graph.uuid_to_index.get(neighbor_uuid) {
-                results.insert(index);
+    while let Some(idx) = stack.pop() {
+        if let Some(parent_indices) = parents.get(&idx) {
+            for &parent_idx in parent_indices {
+                if ancestors.insert(parent_idx) {
+                    stack.push(parent_idx);
+                }
             }
-            dfs_reachability(graph, neighbor_uuid, adjacency_map, visited, path, results)?;
         }
     }
 
-    path.remove(current_uuid);
-    Ok(())
+    ancestors
+}
+
+/// Compute all transitive descendants of `entity_idx` by following `children`.
+///
+/// The entity itself is NOT included.
+pub fn compute_descendants(
+    children: &RapidHashMap<u32, HashSet<u32>>,
+    entity_idx: u32,
+) -> RoaringBitmap {
+    let mut descendants = RoaringBitmap::new();
+    let mut stack = vec![entity_idx];
+
+    while let Some(idx) = stack.pop() {
+        if let Some(child_indices) = children.get(&idx) {
+            for &child_idx in child_indices {
+                if descendants.insert(child_idx) {
+                    stack.push(child_idx);
+                }
+            }
+        }
+    }
+
+    descendants
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbor_types::ArborError;
+    use rapidhash::RapidHashMap;
+
+    fn parents(edges: &[(u32, u32)]) -> RapidHashMap<u32, HashSet<u32>> {
+        let mut map: RapidHashMap<u32, HashSet<u32>> = RapidHashMap::default();
+        for &(child, parent) in edges {
+            map.entry(child).or_default().insert(parent);
+        }
+        map
+    }
+
+    fn children(edges: &[(u32, u32)]) -> RapidHashMap<u32, HashSet<u32>> {
+        let mut map: RapidHashMap<u32, HashSet<u32>> = RapidHashMap::default();
+        for &(parent, child) in edges {
+            map.entry(parent).or_default().insert(child);
+        }
+        map
+    }
 
     #[test]
     fn test_compute_ancestors_success() {
-        let mut graph = Graph::new();
-        let root_id = Uuid::new_v4();
-        let parent_id = Uuid::new_v4();
-        let child_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(root_id, 0);
-        graph.uuid_to_index.insert(parent_id, 1);
-        graph.uuid_to_index.insert(child_id, 2);
-
-        let mut parents_map = HashMap::new();
-        parents_map.insert(child_id, vec![parent_id]);
-        parents_map.insert(parent_id, vec![root_id]);
-
-        let ancestors = compute_ancestors(&graph, child_id, &parents_map).unwrap();
+        // root(0) <- parent(1) <- child(2)
+        let p = parents(&[(2, 1), (1, 0)]);
+        let ancestors = compute_ancestors(&p, 2);
         assert_eq!(ancestors.len(), 2);
-        assert!(ancestors.contains(0)); // root
-        assert!(ancestors.contains(1)); // parent
+        assert!(ancestors.contains(0));
+        assert!(ancestors.contains(1));
     }
 
     #[test]
-    fn test_compute_ancestors_circular_self() {
-        let mut graph = Graph::new();
-        let a_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(a_id, 0);
-
-        let mut parents_map = HashMap::new();
-        parents_map.insert(a_id, vec![a_id]);
-
-        let result = compute_ancestors(&graph, a_id, &parents_map);
-        match result {
-            Err(ArborError::CircularDependency(msg)) => {
-                assert!(msg.contains("Circular dependency detected"));
-            }
-            _ => panic!("Expected CircularDependency error, got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn test_compute_ancestors_circular_indirect() {
-        let mut graph = Graph::new();
-        let a_id = Uuid::new_v4();
-        let b_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(a_id, 0);
-        graph.uuid_to_index.insert(b_id, 1);
-
-        let mut parents_map = HashMap::new();
-        parents_map.insert(a_id, vec![b_id]);
-        parents_map.insert(b_id, vec![a_id]);
-
-        let result = compute_ancestors(&graph, a_id, &parents_map);
-        match result {
-            Err(ArborError::CircularDependency(msg)) => {
-                assert!(msg.contains("Circular dependency detected"));
-            }
-            _ => panic!("Expected CircularDependency error, got {:?}", result),
-        }
+    fn test_compute_ancestors_root_has_none() {
+        let p = parents(&[(1, 0)]);
+        assert!(compute_ancestors(&p, 0).is_empty());
     }
 
     #[test]
     fn test_compute_descendants_success() {
-        let mut graph = Graph::new();
-        let root_id = Uuid::new_v4();
-        let parent_id = Uuid::new_v4();
-        let child_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(root_id, 0);
-        graph.uuid_to_index.insert(parent_id, 1);
-        graph.uuid_to_index.insert(child_id, 2);
-
-        let mut children_map = HashMap::new();
-        children_map.insert(root_id, vec![parent_id]);
-        children_map.insert(parent_id, vec![child_id]);
-
-        let descendants = compute_descendants(&graph, root_id, &children_map).unwrap();
+        // root(0) -> parent(1) -> child(2)
+        let c = children(&[(0, 1), (1, 2)]);
+        let descendants = compute_descendants(&c, 0);
         assert_eq!(descendants.len(), 2);
-        assert!(descendants.contains(1)); // parent
-        assert!(descendants.contains(2)); // child
+        assert!(descendants.contains(1));
+        assert!(descendants.contains(2));
     }
 
     #[test]
-    fn test_compute_descendants_circular_indirect() {
-        let mut graph = Graph::new();
-        let a_id = Uuid::new_v4();
-        let b_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(a_id, 0);
-        graph.uuid_to_index.insert(b_id, 1);
-
-        let mut children_map = HashMap::new();
-        children_map.insert(a_id, vec![b_id]);
-        children_map.insert(b_id, vec![a_id]);
-
-        let result = compute_descendants(&graph, a_id, &children_map);
-        match result {
-            Err(ArborError::CircularDependency(msg)) => {
-                assert!(msg.contains("Circular dependency detected"));
-            }
-            _ => panic!("Expected CircularDependency error, got {:?}", result),
-        }
+    fn test_compute_descendants_leaf_has_none() {
+        let c = children(&[(0, 1)]);
+        assert!(compute_descendants(&c, 1).is_empty());
     }
 
     #[test]
     fn test_compute_ancestors_diamond_pattern() {
-        let mut graph = Graph::new();
-        let a_id = Uuid::new_v4();
-        let b_id = Uuid::new_v4();
-        let c_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(a_id, 0);
-        graph.uuid_to_index.insert(b_id, 1);
-        graph.uuid_to_index.insert(c_id, 2);
-
-        let mut parents_map = HashMap::new();
-        parents_map.insert(a_id, vec![b_id, c_id]);
-        parents_map.insert(b_id, vec![c_id]);
-
-        let ancestors = compute_ancestors(&graph, a_id, &parents_map).unwrap();
+        // A(0) has parents B(1) and C(2); B(1) has parent C(2)
+        let p = parents(&[(0, 1), (0, 2), (1, 2)]);
+        let ancestors = compute_ancestors(&p, 0);
         assert_eq!(ancestors.len(), 2);
-        assert!(ancestors.contains(1)); // B
-        assert!(ancestors.contains(2)); // C
+        assert!(ancestors.contains(1));
+        assert!(ancestors.contains(2));
     }
 
     #[test]
     fn test_compute_descendants_diamond_pattern() {
-        let mut graph = Graph::new();
-        let a_id = Uuid::new_v4();
-        let b_id = Uuid::new_v4();
-        let c_id = Uuid::new_v4();
-
-        graph.uuid_to_index.insert(a_id, 0);
-        graph.uuid_to_index.insert(b_id, 1);
-        graph.uuid_to_index.insert(c_id, 2);
-
-        let mut children_map = HashMap::new();
-        children_map.insert(c_id, vec![b_id, a_id]);
-        children_map.insert(b_id, vec![a_id]);
-
-        let descendants = compute_descendants(&graph, c_id, &children_map).unwrap();
+        // C(2) has children B(1) and A(0); B(1) has child A(0)
+        let c = children(&[(2, 1), (2, 0), (1, 0)]);
+        let descendants = compute_descendants(&c, 2);
         assert_eq!(descendants.len(), 2);
-        assert!(descendants.contains(1)); // B
-        assert!(descendants.contains(0)); // A
+        assert!(descendants.contains(1));
+        assert!(descendants.contains(0));
     }
 }

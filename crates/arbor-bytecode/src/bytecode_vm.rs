@@ -20,16 +20,12 @@
 //! would turn `Missing == X → false` into `NOT false → true`, creating an
 //! authorization bypass for conditions like `permit if principal.tier != "restricted"`.
 
-use arbor_types::{
-    AttributeValue, ConditionResult, EntityTypeId, EvaluationContext, EvaluationError,
-    OpCode, VariableRef, VariableScope,
-};
+use arbor_types::{AttributeValue, ConditionResult, ResolvedEntityIndex, EntityTypeId, EvaluationContext, EvaluationError, OpCode, VariableRef, VariableScope};
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
 use std::net::IpAddr;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StackValue {
@@ -38,7 +34,7 @@ pub enum StackValue {
     Timestamp(DateTime<Utc>),
     String(String),
     Bool(bool),
-    EntityRef(Uuid),
+    EntityRef(u32),
     IpAddr(IpAddr),
     IpNetwork(IpNet),
     Set(Vec<AttributeValue>),
@@ -204,8 +200,8 @@ impl<'a> BytecodeVM<'a> {
                 self.stack.push(StackValue::IpNetwork(*net));
                 Ok(())
             },
-            OpCode::PushEntityRef(uuid) => {
-                self.stack.push(StackValue::EntityRef(*uuid));
+            OpCode::PushEntityRef(idx) => {
+                self.stack.push(StackValue::EntityRef(*idx));
                 Ok(())
             }
             OpCode::PushVariable(var_ref) => self.execute_push_variable(var_ref),
@@ -233,9 +229,7 @@ impl<'a> BytecodeVM<'a> {
             OpCode::Like => self.execute_like(),
             OpCode::IsType(scope, type_id) => self.execute_is_type(scope, type_id),
             OpCode::InNetwork => self.execute_in_network(),
-            OpCode::InHierarchy(scope, target_idx) => self.execute_in_hierarchy(scope, *target_idx),
-            OpCode::InHierarchyVar(var_ref, target_idx) => self.execute_in_hierarchy_var(var_ref, *target_idx),
-            OpCode::ContainsInHierarchy(target_idx) => self.execute_contains_in_hierarchy(*target_idx),
+            OpCode::InHierarchy(descendant, ancestor) => self.execute_in_hierarchy(descendant, ancestor),
             OpCode::JumpIfFalse(_) | OpCode::Jump(_) | OpCode::JumpIfTrue(_) => {
                 Err("control flow shouldn't evaluate here".into())
             }
@@ -270,6 +264,13 @@ impl<'a> BytecodeVM<'a> {
             VariableScope::Resource => &self.context.resource.attributes,
             VariableScope::Context => self.context.context_attrs?,
         };
+        if var_ref.path.is_empty() {
+            return match var_ref.scope {
+                VariableScope::Principal => Some(AttributeValue::EntityRef(self.context.principal.idx)),
+                VariableScope::Resource => Some(AttributeValue::EntityRef(self.context.resource.idx)),
+                VariableScope::Context => None,
+            }
+        }
         base.get_nested(&var_ref.path).cloned()
     }
 
@@ -579,111 +580,32 @@ impl<'a> BytecodeVM<'a> {
 
     // ===== Entity Type Check =====
 
-    /// Checks whether the entity at `scope` is or descends from `target_idx`.
-    ///
-    /// The target index is pre-resolved by the compiler — UUID→index lookup happens
-    /// at compile/index time, never at evaluation time. The VM performs a single
-    /// roaring bitmap `contains` call, which is O(log n) worst-case and typically O(1).
-    ///
-    /// Self-inclusive: the snapshot builder is responsible for including each
-    /// entity's own index in its `ancestors` bitmap.
-    fn execute_in_hierarchy(&mut self, scope: &VariableScope, target_idx: u32) -> Result<(), String> {
-        let entity = match scope {
-            VariableScope::Principal => self.context.principal,
-            VariableScope::Resource => self.context.resource,
-            VariableScope::Context => return Err("InHierarchy is not valid on Context scope".into()),
-        };
-        self.stack.push(StackValue::Bool(entity.ancestors.contains(target_idx)));
-        Ok(())
-    }
+    fn execute_in_hierarchy(&mut self, descendant: &ResolvedEntityIndex, ancestor: &ResolvedEntityIndex) -> Result<(), String> {
+        let desc_idx = match descendant {
+            ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
+            ResolvedEntityIndex::Variable(var_ref) => {
+                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref) else {
+                    return Err("Variable must resolve to EntityRef".into());
+                };
+                Ok(ent)
+            },
+        }?;
 
-    /// Resolves `var_ref` to an `EntityRef` attribute, looks up that entity in the
-    /// snapshot via `EntityResolver`, and checks its `ancestors` bitmap for `target_idx`.
-    ///
-    /// Missing attribute or unresolvable UUID → `false` (treat like any missing value).
-    /// Attribute is not an `EntityRef` → `Invalid` (type mismatch, compiler bug).
-    /// No `EntityResolver` attached to context → `Invalid` (caller must use `with_entities`).
-    fn execute_in_hierarchy_var(&mut self, var_ref: &VariableRef, target_idx: u32) -> Result<(), String> {
-        let resolver = self.context.entities.ok_or(
-            "InHierarchyVar: EvaluationContext has no EntityResolver — call with_entities(snapshot)"
-        )?;
+        let anc_idx = match ancestor {
+            ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
+            ResolvedEntityIndex::Variable(var_ref) => {
+                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref) else {
+                    return Err("Variable must resolve to EntityRef".into());
+                };
+                Ok(ent)
+            },
+        }?;
 
-        let uuid = match self.resolve_variable(var_ref) {
-            None => {
-                // Missing attribute → false, consistent with other Missing semantics.
-                self.stack.push(StackValue::Bool(false));
-                return Ok(());
-            }
-            Some(AttributeValue::EntityRef(uuid)) => uuid,
-            Some(other) => {
-                return Err(format!(
-                    "InHierarchyVar: expected EntityRef attribute, got {:?}",
-                    other
-                ));
-            }
+        let Some(desc) = self.context.entities.get_entity(desc_idx) else {
+            return Err("Entity not found".into());
         };
 
-        let entity_idx = match resolver.resolve_uuid(&uuid) {
-            Some(idx) => idx,
-            None => {
-                // UUID not in snapshot (stale reference) → false.
-                self.stack.push(StackValue::Bool(false));
-                return Ok(());
-            }
-        };
-
-        let entity = match resolver.get_entity(entity_idx) {
-            Some(e) => e,
-            None => {
-                self.stack.push(StackValue::Bool(false));
-                return Ok(());
-            }
-        };
-
-        self.stack.push(StackValue::Bool(entity.ancestors.contains(target_idx)));
-        Ok(())
-    }
-
-    /// Pops a set of `EntityRef`s and checks whether any element is the target or
-    /// a descendant of it. Short-circuits on the first match.
-    ///
-    /// Unresolvable UUIDs are skipped — they are simply not in the hierarchy.
-    /// Non-`EntityRef` elements return `Invalid` (compiler should never produce this).
-    fn execute_contains_in_hierarchy(&mut self, target_idx: u32) -> Result<(), String> {
-        let resolver = self.context.entities.ok_or(
-            "ContainsInHierarchy: EvaluationContext has no EntityResolver — call with_entities(snapshot)"
-        )?;
-
-        let set = match self.pop()? {
-            StackValue::Missing => {
-                self.stack.push(StackValue::Bool(false));
-                return Ok(());
-            }
-            StackValue::Set(vals) => vals,
-            other => return Err(format!("ContainsInHierarchy requires a set, got {:?}", other)),
-        };
-
-        for elem in &set {
-            match elem {
-                AttributeValue::EntityRef(uuid) => {
-                    // Unresolvable UUID → not in hierarchy, skip.
-                    let Some(entity_idx) = resolver.resolve_uuid(uuid) else { continue };
-                    let Some(entity) = resolver.get_entity(entity_idx) else { continue };
-                    if entity.ancestors.contains(target_idx) {
-                        self.stack.push(StackValue::Bool(true));
-                        return Ok(());
-                    }
-                }
-                other => {
-                    return Err(format!(
-                        "ContainsInHierarchy: set element must be EntityRef, got {:?}",
-                        other
-                    ));
-                }
-            }
-        }
-
-        self.stack.push(StackValue::Bool(false));
+        self.stack.push(StackValue::Bool(desc.ancestors.contains(anc_idx)));
         Ok(())
     }
 
@@ -859,14 +781,56 @@ impl<'a> BytecodeVM<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use arbor_types::{
-        AttributeNameId, AttributeValue, Attributes, EntityTypeId, IndexedEntity,
+        AttributeNameId, AttributeValue, Attributes, EntityResolver, EntityTypeId, IndexedEntity,
         VariableRef, VariableScope,
     };
     use roaring::RoaringBitmap;
 
+    // ── Test infrastructure ───────────────────────────────────────────────────
+
+    /// Resolver that always returns None — for tests that don't use InHierarchy(Variable).
+    struct NoopResolver;
+
+    impl EntityResolver for NoopResolver {
+        fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
+    }
+
+    /// HashMap-based resolver — for InHierarchy tests that need entity lookups.
+    struct MapResolver(HashMap<u32, IndexedEntity>);
+
+    impl MapResolver {
+        fn new() -> Self { Self(HashMap::new()) }
+        fn insert(mut self, entity: IndexedEntity) -> Self {
+            self.0.insert(entity.idx, entity);
+            self
+        }
+    }
+
+    impl EntityResolver for MapResolver {
+        fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
+            self.0.get(&index)
+        }
+    }
+
+    // ── Entity helpers ────────────────────────────────────────────────────────
+
     fn make_test_entity() -> IndexedEntity {
         IndexedEntity {
+            idx: 0,
+            attributes: Attributes::new(),
+            entity_type: EntityTypeId::new(1),
+            descendants: RoaringBitmap::new(),
+            ancestors: RoaringBitmap::new(),
+            principal_of_policies: None,
+            resource_of_policies: None,
+        }
+    }
+
+    fn make_entity_at(idx: u32) -> IndexedEntity {
+        IndexedEntity {
+            idx,
             attributes: Attributes::new(),
             entity_type: EntityTypeId::new(1),
             descendants: RoaringBitmap::new(),
@@ -882,6 +846,14 @@ mod tests {
         entity
     }
 
+    fn make_entity_with_ancestors(idx: u32, ancestors: &[u32]) -> IndexedEntity {
+        let mut entity = make_entity_at(idx);
+        for &a in ancestors {
+            entity.ancestors.insert(a);
+        }
+        entity
+    }
+
     fn var_ref_principal(attr_id: u32) -> VariableRef {
         VariableRef {
             scope: VariableScope::Principal,
@@ -889,13 +861,18 @@ mod tests {
         }
     }
 
-    // ===== Existing Tests =====
+    /// Returns a VariableRef for the scope entity itself (empty path).
+    fn scope_var(scope: VariableScope) -> VariableRef {
+        VariableRef { scope, path: vec![] }
+    }
+
+    // ===== Basic Comparison Tests =====
 
     #[test]
     fn test_simple_equality() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
@@ -909,7 +886,7 @@ mod tests {
     fn test_simple_inequality() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
@@ -923,7 +900,7 @@ mod tests {
     fn test_and_operation() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushInteger(10),
@@ -941,7 +918,7 @@ mod tests {
     fn test_or_operation() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         // (10 > 20) OR (5 == 5) → false OR true → true
         let result = vm.evaluate(&[
@@ -960,7 +937,7 @@ mod tests {
     fn test_not_operation() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         // NOT(5 == 10) → NOT(false) → true
         let result = vm.evaluate(&[
@@ -976,7 +953,7 @@ mod tests {
     fn test_comparison_operations() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
@@ -1013,7 +990,7 @@ mod tests {
     fn test_missing_eq_is_false() {
         let principal = make_test_entity(); // no attributes
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1030,7 +1007,7 @@ mod tests {
         // grant access to any principal without a tier attribute.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1044,7 +1021,7 @@ mod tests {
     fn test_missing_lt_is_false() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1058,11 +1035,11 @@ mod tests {
     fn test_missing_in_set_is_false() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::PushSet(vec![ AttributeValue::String("admin".into( ))]),
+            OpCode::PushSet(vec![AttributeValue::String("admin".into())]),
             OpCode::In,
         ]);
         assert_eq!(result, ConditionResult::False);
@@ -1073,7 +1050,7 @@ mod tests {
         // Compiler invariant violation: PushVariable not consumed by a comparison.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1087,7 +1064,7 @@ mod tests {
         // A lone PushVariable with nothing consuming it is a compiler bug.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::PushVariable(var_ref_principal(99))]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
@@ -1097,9 +1074,9 @@ mod tests {
 
     #[test]
     fn test_has_attribute_present() {
-        let principal = make_entity_with_attr(1,  AttributeValue::Bool(true ));
+        let principal = make_entity_with_attr(1, AttributeValue::Bool(true));
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(1))]);
         assert_eq!(result, ConditionResult::True);
@@ -1109,7 +1086,7 @@ mod tests {
     fn test_has_attribute_absent() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(99))]);
         assert_eq!(result, ConditionResult::False);
@@ -1119,12 +1096,9 @@ mod tests {
 
     #[test]
     fn test_variable_resolution_eq() {
-        let principal = make_entity_with_attr(
-            1,
-             AttributeValue::String("gold".into( )),
-        );
+        let principal = make_entity_with_attr(1, AttributeValue::String("gold".into()));
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1137,10 +1111,9 @@ mod tests {
     #[test]
     fn test_missing_and_true_is_false() {
         // (true) AND (missing == "gold") → true AND false → false
-        // Verifies Missing is consumed by Eq before And sees it.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushBool(true),
@@ -1158,19 +1131,17 @@ mod tests {
 
     #[test]
     fn test_contains_all_int_float_coercion() {
-        // Set contains Integer(5); subset has Float(5.0). ContainsAll must use
-        // scalar_eq (which handles coercion), not derived PartialEq.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushSet(vec![
-                 AttributeValue::Integer(5 ),
-                 AttributeValue::Integer(10 ),
+                AttributeValue::Integer(5),
+                AttributeValue::Integer(10),
             ]),
             OpCode::PushSet(vec![
-                 AttributeValue::Float(ordered_float::OrderedFloat(5.0 )),
+                AttributeValue::Float(ordered_float::OrderedFloat(5.0)),
             ]),
             OpCode::ContainsAll,
         ]);
@@ -1181,13 +1152,13 @@ mod tests {
     fn test_push_set_in_operation() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("editor".into()),
             OpCode::PushSet(vec![
-                 AttributeValue::String("admin".into( )),
-                 AttributeValue::String("editor".into( )),
+                AttributeValue::String("admin".into()),
+                AttributeValue::String("editor".into()),
             ]),
             OpCode::In,
         ]);
@@ -1198,7 +1169,7 @@ mod tests {
     fn test_neq_on_equal_values_is_false() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
@@ -1212,7 +1183,7 @@ mod tests {
     fn test_neq_on_unequal_values_is_true() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
@@ -1228,7 +1199,7 @@ mod tests {
     fn test_starts_with_match() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
@@ -1242,7 +1213,7 @@ mod tests {
     fn test_starts_with_no_match() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
@@ -1256,7 +1227,7 @@ mod tests {
     fn test_ends_with_match() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
@@ -1270,7 +1241,7 @@ mod tests {
     fn test_string_contains_match() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
@@ -1284,7 +1255,7 @@ mod tests {
     fn test_string_ops_missing_is_false() {
         let principal = make_test_entity(); // no attributes
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
 
         let mut vm = BytecodeVM::new(&ctx);
         assert_eq!(vm.evaluate(&[
@@ -1349,7 +1320,6 @@ mod tests {
         assert!(BytecodeVM::glob_match("fooXbar", "foo*bar"));
         assert!(BytecodeVM::glob_match("foobar", "foo*bar")); // * matches empty
         assert!(!BytecodeVM::glob_match("fooXbaz", "foo*bar"));
-        // Pattern ending doesn't anchor: "foobar..." won't match "foo*bar" if trailing chars remain
         assert!(!BytecodeVM::glob_match("foobarbaz", "foo*bar"));
     }
 
@@ -1364,7 +1334,7 @@ mod tests {
     fn test_like_opcode() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
@@ -1381,7 +1351,7 @@ mod tests {
         let mut principal = make_test_entity();
         principal.entity_type = EntityTypeId::new(42);
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(42))]);
         assert_eq!(result, ConditionResult::True);
@@ -1392,7 +1362,7 @@ mod tests {
         let mut principal = make_test_entity();
         principal.entity_type = EntityTypeId::new(42);
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(99))]);
         assert_eq!(result, ConditionResult::False);
@@ -1403,7 +1373,7 @@ mod tests {
         let principal = make_test_entity();
         let mut resource = make_test_entity();
         resource.entity_type = EntityTypeId::new(7);
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::IsType(VariableScope::Resource, EntityTypeId::new(7))]);
         assert_eq!(result, ConditionResult::True);
@@ -1413,365 +1383,211 @@ mod tests {
     fn test_is_type_context_scope_is_invalid() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[OpCode::IsType(VariableScope::Context, EntityTypeId::new(1))]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
     // ===== InHierarchy Tests =====
-
-    fn make_entity_with_ancestors(indices: &[u32]) -> IndexedEntity {
-        let mut entity = make_test_entity();
-        for &idx in indices {
-            entity.ancestors.insert(idx);
-        }
-        entity
-    }
+    //
+    // InHierarchy(descendant, ancestor) where both are ResolvedEntityIndex:
+    //   Variable(scope_var) → resolve_variable(scope, []) → EntityRef(entity.idx)
+    //                       → get_entity(idx) → check ancestors.contains(anc_idx)
+    //   Direct(idx)         → use idx directly → get_entity(idx)
+    //
+    // The entity under test must be in the MapResolver at its own idx.
 
     #[test]
     fn test_in_hierarchy_self_inclusive() {
-        // The snapshot builder includes the entity's own index in ancestors.
-        // Index 5 is in the ancestors bitmap → InHierarchy(Principal, 5) → true.
-        let principal = make_entity_with_ancestors(&[5]);
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        // Principal at idx=0, ancestors=[5]. InHierarchy(Variable(Principal), Direct(5)) → true.
+        let principal = make_entity_with_ancestors(0, &[5]);
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(principal.clone());
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchy(VariableScope::Principal, 5)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
+            ResolvedEntityIndex::Direct(5),
+        )]);
         assert_eq!(result, ConditionResult::True);
     }
 
     #[test]
     fn test_in_hierarchy_ancestor_match() {
-        // Principal has ancestors [10, 20, 30] (e.g., member of groups at those indices).
-        let principal = make_entity_with_ancestors(&[10, 20, 30]);
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        // Principal has ancestors [10, 20, 30]. Check InHierarchy(principal, 20) → true.
+        let principal = make_entity_with_ancestors(0, &[10, 20, 30]);
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(principal.clone());
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchy(VariableScope::Principal, 20)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
+            ResolvedEntityIndex::Direct(20),
+        )]);
         assert_eq!(result, ConditionResult::True);
     }
 
     #[test]
     fn test_in_hierarchy_no_match() {
-        let principal = make_entity_with_ancestors(&[10, 20]);
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let principal = make_entity_with_ancestors(0, &[10, 20]);
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(principal.clone());
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchy(VariableScope::Principal, 99)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
+            ResolvedEntityIndex::Direct(99),
+        )]);
         assert_eq!(result, ConditionResult::False);
     }
 
     #[test]
     fn test_in_hierarchy_resource_scope() {
-        let principal = make_test_entity();
-        let resource = make_entity_with_ancestors(&[7]);
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        // Resource at idx=1, ancestors=[7]. InHierarchy(Variable(Resource), Direct(7)) → true.
+        let principal = make_entity_at(0);
+        let resource = make_entity_with_ancestors(1, &[7]);
+        let resolver = MapResolver::new().insert(resource.clone());
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchy(VariableScope::Resource, 7)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(scope_var(VariableScope::Resource)),
+            ResolvedEntityIndex::Direct(7),
+        )]);
         assert_eq!(result, ConditionResult::True);
     }
 
     #[test]
     fn test_in_hierarchy_context_scope_is_invalid() {
+        // Context scope with empty path: resolve_variable returns None → Err → Invalid.
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchy(VariableScope::Context, 1)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(scope_var(VariableScope::Context)),
+            ResolvedEntityIndex::Direct(1),
+        )]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
     #[test]
     fn test_in_hierarchy_combined_with_type_check() {
         // `permit if principal is Admin AND principal in AdminGroup`
-        // Principal is type 42, has ancestor index 100.
-        let mut principal = make_entity_with_ancestors(&[100]);
+        let mut principal = make_entity_with_ancestors(0, &[100]);
         principal.entity_type = EntityTypeId::new(42);
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(principal.clone());
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
         let result = vm.evaluate(&[
             OpCode::IsType(VariableScope::Principal, EntityTypeId::new(42)),
-            OpCode::InHierarchy(VariableScope::Principal, 100),
+            OpCode::InHierarchy(
+                ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
+                ResolvedEntityIndex::Direct(100),
+            ),
             OpCode::And,
         ]);
         assert_eq!(result, ConditionResult::True);
     }
 
-    // ===== InHierarchyVar Tests =====
-
-    use std::collections::HashMap;
-    use arbor_types::EntityResolver;
-
-    struct TestEntityResolver {
-        uuid_map: HashMap<Uuid, u32>,
-        entities: HashMap<u32, IndexedEntity>,
-    }
-
-    impl TestEntityResolver {
-        fn new() -> Self {
-            Self { uuid_map: HashMap::new(), entities: HashMap::new() }
-        }
-
-        fn add(&mut self, uuid: Uuid, idx: u32, ancestors: &[u32]) {
-            let mut entity = make_test_entity();
-            for &a in ancestors {
-                entity.ancestors.insert(a);
-            }
-            self.uuid_map.insert(uuid, idx);
-            self.entities.insert(idx, entity);
-        }
-    }
-
-    impl EntityResolver for TestEntityResolver {
-        fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
-            self.entities.get(&index)
-        }
-        fn resolve_uuid(&self, uuid: &Uuid) -> Option<u32> {
-            self.uuid_map.get(uuid).copied()
-        }
-    }
+    // ===== InHierarchy(Variable(attr_path), Direct) Tests =====
+    //
+    // When left operand is a Variable with a non-empty path, the VM resolves the
+    // attribute to an EntityRef(u32) index, then looks up that entity in the resolver.
 
     #[test]
-    fn test_in_hierarchy_var_match() {
-        // principal.manager = EntityRef(manager_uuid)
-        // manager is at index 10, has ancestor 50 (AdminGroup)
-        // InHierarchyVar(principal.manager, 50) → true
-        let manager_uuid = Uuid::new_v4();
-        let mut store = TestEntityResolver::new();
-        store.add(manager_uuid, 10, &[10, 50]); // self-inclusive + AdminGroup
-
-        let principal = make_entity_with_attr(
-            1,
-            AttributeValue::EntityRef(manager_uuid),
-        );
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None)
-            .with_entities(&store);
+    fn test_in_hierarchy_attr_match() {
+        // principal.manager_ref = EntityRef(10u32)
+        // manager entity at index 10, ancestors [10, 50] (self + AdminGroup)
+        // InHierarchy(Variable(principal.manager_ref), Direct(50)) → true
+        let manager = make_entity_with_ancestors(10, &[10, 50]);
+        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(10u32));
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(manager);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::InHierarchyVar(var_ref_principal(1), 50),
-        ]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var_ref_principal(1)),
+            ResolvedEntityIndex::Direct(50),
+        )]);
         assert_eq!(result, ConditionResult::True);
     }
 
     #[test]
-    fn test_in_hierarchy_var_no_match() {
-        let manager_uuid = Uuid::new_v4();
-        let mut store = TestEntityResolver::new();
-        store.add(manager_uuid, 10, &[10]); // only self, not in group 50
-
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(manager_uuid));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
+    fn test_in_hierarchy_attr_no_match() {
+        // manager at index 10, only self in ancestors — not in group 50
+        let manager = make_entity_with_ancestors(10, &[10]);
+        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(10u32));
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new().insert(manager);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchyVar(var_ref_principal(1), 50)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var_ref_principal(1)),
+            ResolvedEntityIndex::Direct(50),
+        )]);
         assert_eq!(result, ConditionResult::False);
     }
 
     #[test]
-    fn test_in_hierarchy_var_missing_attribute_is_false() {
-        // principal has no attr at id 1 → Missing → false
-        let store = TestEntityResolver::new();
+    fn test_in_hierarchy_attr_missing_attribute_is_invalid() {
+        // principal has no attr at id 1 → resolve_variable returns None
+        // → pattern `Some(EntityRef(ent)) = None` fails → Err → Invalid
         let principal = make_test_entity();
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
+        let resource = make_entity_at(1);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchyVar(var_ref_principal(1), 50)]);
-        assert_eq!(result, ConditionResult::False);
-    }
-
-    #[test]
-    fn test_in_hierarchy_var_stale_uuid_is_false() {
-        // Attribute holds a UUID not present in the snapshot → false
-        let store = TestEntityResolver::new(); // empty — UUID won't resolve
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(Uuid::new_v4()));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchyVar(var_ref_principal(1), 50)]);
-        assert_eq!(result, ConditionResult::False);
-    }
-
-    #[test]
-    fn test_in_hierarchy_var_wrong_type_is_invalid() {
-        // Attribute holds a String, not an EntityRef → type mismatch → Invalid
-        let store = TestEntityResolver::new();
-        let principal = make_entity_with_attr(
-            1,
-             AttributeValue::String("not-an-entity".into( )),
-        );
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchyVar(var_ref_principal(1), 50)]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var_ref_principal(1)),
+            ResolvedEntityIndex::Direct(50),
+        )]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
     #[test]
-    fn test_in_hierarchy_var_no_resolver_is_invalid() {
-        // No EntityResolver attached → Invalid
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(Uuid::new_v4()));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None); // no with_entities
+    fn test_in_hierarchy_attr_unknown_index_is_invalid() {
+        // Attribute holds index 999, which is not present in the resolver.
+        // get_entity(999) returns None → Err → Invalid.
+        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(999u32));
+        let resource = make_entity_at(1);
+        let resolver = MapResolver::new(); // empty — index 999 not registered
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::InHierarchyVar(var_ref_principal(1), 50)]);
-        assert!(matches!(result, ConditionResult::Invalid(_)));
-    }
-
-    // ===== ContainsInHierarchy Tests =====
-
-    #[test]
-    fn test_contains_in_hierarchy_match() {
-        // principal.groups = [group_a_uuid, group_b_uuid]
-        // group_b is at index 20, has ancestor 50 (AdminGroup)
-        // ContainsInHierarchy(50) → true (group_b is in AdminGroup hierarchy)
-        let group_a = Uuid::new_v4();
-        let group_b = Uuid::new_v4();
-        let mut store = TestEntityResolver::new();
-        store.add(group_a, 10, &[10]);       // group_a — not in admin hierarchy
-        store.add(group_b, 20, &[20, 50]);   // group_b — is in admin hierarchy
-
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-            AttributeValue::EntityRef(group_a),
-            AttributeValue::EntityRef(group_b),
-        ]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
-        assert_eq!(result, ConditionResult::True);
-    }
-
-    #[test]
-    fn test_contains_in_hierarchy_no_match() {
-        // Neither group is in the target hierarchy
-        let group_a = Uuid::new_v4();
-        let group_b = Uuid::new_v4();
-        let mut store = TestEntityResolver::new();
-        store.add(group_a, 10, &[10]);
-        store.add(group_b, 20, &[20]);
-
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-            AttributeValue::EntityRef(group_a),
-            AttributeValue::EntityRef(group_b),
-        ]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
-        assert_eq!(result, ConditionResult::False);
-    }
-
-    #[test]
-    fn test_contains_in_hierarchy_empty_set_is_false() {
-        let store = TestEntityResolver::new();
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
-        assert_eq!(result, ConditionResult::False);
-    }
-
-    #[test]
-    fn test_contains_in_hierarchy_missing_attribute_is_false() {
-        let store = TestEntityResolver::new();
-        let principal = make_test_entity(); // no groups attribute
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
-        assert_eq!(result, ConditionResult::False);
-    }
-
-    #[test]
-    fn test_contains_in_hierarchy_stale_uuid_skipped() {
-        // One UUID resolves, one doesn't. Stale one is skipped; valid one is checked.
-        let known = Uuid::new_v4();
-        let stale = Uuid::new_v4();
-        let mut store = TestEntityResolver::new();
-        store.add(known, 10, &[10, 50]); // known is in hierarchy
-
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-            AttributeValue::EntityRef(stale),  // not in snapshot
-            AttributeValue::EntityRef(known),  // is in hierarchy
-        ]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
-        assert_eq!(result, ConditionResult::True);
-    }
-
-    #[test]
-    fn test_contains_in_hierarchy_non_entity_ref_is_invalid() {
-        let store = TestEntityResolver::new();
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-             AttributeValue::String("not-an-entity".into( )),
-        ]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None).with_entities(&store);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var_ref_principal(1)),
+            ResolvedEntityIndex::Direct(50),
+        )]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
     #[test]
-    fn test_contains_in_hierarchy_no_resolver_is_invalid() {
-        let principal = make_entity_with_attr(1, AttributeValue::Set(vec![
-            AttributeValue::EntityRef(Uuid::new_v4()),
-        ]));
-        let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+    fn test_in_hierarchy_attr_wrong_type_is_invalid() {
+        // Attribute holds a String, not an EntityRef → pattern match fails → Invalid.
+        let principal = make_entity_with_attr(1, AttributeValue::String("not-an-entity".into()));
+        let resource = make_entity_at(1);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[
-            OpCode::PushVariable(var_ref_principal(1)),
-            OpCode::ContainsInHierarchy(50),
-        ]);
+        let result = vm.evaluate(&[OpCode::InHierarchy(
+            ResolvedEntityIndex::Variable(var_ref_principal(1)),
+            ResolvedEntityIndex::Direct(50),
+        )]);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
+
+    // ===== Short-Circuit Tests =====
 
     #[test]
     fn test_short_circuit_and_with_missing() {
         let principal = make_test_entity(); // has nothing
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
 
-        // Instructions:
-        // 0: PushVariable(1)
-        // 1: PushScalar(1)
-        // 2: Eq -> false
-        // 3: JumpIfFalse(8)
-        // 4: PushVariable(2)
-        // 5: PushScalar(2)
-        // 6: Eq
-        // 7: Jump(9)
-        // 8: PushScalar(false)
         let instructions = vec![
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushInteger(1),
-            OpCode::Eq,              // -> false
+            OpCode::Eq,              // → false
             OpCode::JumpIfFalse(8),  // jump taken
             OpCode::PushVariable(var_ref_principal(2)),
             OpCode::PushInteger(2),
@@ -1788,33 +1604,21 @@ mod tests {
     fn test_short_circuit_or_with_missing() {
         let principal = make_test_entity();
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut _vm_placeholder = BytecodeVM::new(&ctx);
 
-        // (principal.missing == 1) || (principal.present == "value")
-        // principal.present exists.
-        let principal = make_entity_with_attr(2,  AttributeValue::String("value".into( )));
-        let ctx = EvaluationContext::new(&principal, &resource, None);
+        let principal = make_entity_with_attr(2, AttributeValue::String("value".into()));
+        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut vm = BytecodeVM::new(&ctx);
 
-        // Instructions:
-        // 0: PushVariable(1)
-        // 1: PushScalar(1)
-        // 2: Eq -> false
-        // 3: JumpIfTrue(8)
-        // 4: PushVariable(2)
-        // 5: PushScalar("value")
-        // 6: Eq -> true
-        // 7: Jump(9)
-        // 8: PushScalar(true)
         let instructions = vec![
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushInteger(1),
-            OpCode::Eq,              // -> false
+            OpCode::Eq,              // → false
             OpCode::JumpIfTrue(8),   // jump NOT taken
             OpCode::PushVariable(var_ref_principal(2)),
             OpCode::PushString("value".into()),
-            OpCode::Eq,              // -> true
+            OpCode::Eq,              // → true
             OpCode::Jump(9),
             OpCode::PushBool(true),
         ];
