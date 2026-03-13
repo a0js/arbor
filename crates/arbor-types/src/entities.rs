@@ -80,10 +80,15 @@ pub struct IndexedEntity {
     pub idx: u32,
     pub attributes: Attributes,
     pub entity_type: EntityTypeId,
-    pub descendants: RoaringBitmap,
     pub ancestors: RoaringBitmap,
     pub principal_of_policies: Option<RoaringBitmap>,
     pub resource_of_policies: Option<RoaringBitmap>,
+    /// Precomputed union of all policies that apply to this entity as a principal.
+    /// Set by the snapshot builder after all entities and policies are processed.
+    pub effective_principal_policies: Option<RoaringBitmap>,
+    /// Precomputed union of all policies that apply to this entity as a resource.
+    /// Set by the snapshot builder after all entities and policies are processed.
+    pub effective_resource_policies: Option<RoaringBitmap>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

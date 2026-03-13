@@ -14,7 +14,7 @@ use rapidhash::RapidHashMap;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 
-use crate::closures::{compute_ancestors, compute_descendants};
+use crate::closures::{compute_all_descendants, compute_ancestors};
 
 // ---------------------------------------------------------------------------
 // Free helper functions
@@ -107,6 +107,10 @@ struct BuildState {
     descendant_principal_policies: RoaringBitmap,
     descendant_resource_policies: RoaringBitmap,
 
+    /// Transitive descendants per entity index, computed during `process_entity`.
+    /// Index-time only; not stored on `IndexedEntity`.
+    entity_descendants: Vec<RoaringBitmap>,
+
     /// Deferred (entity_idx, policy_idx) pairs written back after the full
     /// node scan, once all entities are in place.
     deferred_principal: Vec<(u32, u32)>,
@@ -114,7 +118,7 @@ struct BuildState {
 }
 
 impl BuildState {
-    fn new(node_count: usize) -> Self {
+    fn new(node_count: usize, entity_descendants: Vec<RoaringBitmap>) -> Self {
         Self {
             nodes: (0..node_count).map(|_| IndexedNode::Other).collect(),
             indexed_entity_types: RapidHashMap::default(),
@@ -127,6 +131,7 @@ impl BuildState {
             forbidding_policies: RoaringBitmap::new(),
             descendant_principal_policies: RoaringBitmap::new(),
             descendant_resource_policies: RoaringBitmap::new(),
+            entity_descendants,
             deferred_principal: Vec::new(),
             deferred_resource: Vec::new(),
         }
@@ -137,7 +142,7 @@ impl BuildState {
 
         let mut ancestors = compute_ancestors(&graph.parents, idx);
         ancestors.insert(idx); // self-inclusive (InHierarchy invariant)
-        let descendants = compute_descendants(&graph.children, idx);
+        // entity_descendants[idx] already populated by compute_all_descendants
 
         self.indexed_entity_types
             .entry(entity.entity_type)
@@ -150,9 +155,10 @@ impl BuildState {
             attributes: entity.attributes.clone(),
             entity_type: entity.entity_type,
             ancestors,
-            descendants,
             principal_of_policies: None,
             resource_of_policies: None,
+            effective_principal_policies: None,
+            effective_resource_policies: None,
         });
     }
 
@@ -192,6 +198,8 @@ impl BuildState {
             conditions,
             is_forbidding,
             is_conditional,
+            principal_descendants: None,
+            resource_descendants: None,
         });
 
         Ok(())
@@ -266,6 +274,93 @@ impl BuildState {
         }
     }
 
+    /// Pass 1: stamp `principal_descendants` / `resource_descendants` onto each
+    /// `EntityWithDescendants` policy using the pre-computed `entity_descendants` table.
+    ///
+    /// Pass 2: for every entity compute and store its effective policy union as
+    /// `effective_principal_policies` / `effective_resource_policies`.
+    fn compute_derived_fields(&mut self) {
+        // Single scan: collect all derived values into temp arrays, then write back.
+        //
+        // For each policy node: copy its (Copy) targets, release the borrow on `self.nodes`,
+        // then read `self.entity_descendants` to build the descendant bitmaps.
+        // For each entity node: clone the fields needed for the ancestor walk, release the
+        // borrow, then read `self.nodes[anc_idx]` freely.
+        let node_count = self.nodes.len();
+        let mut policy_principal_desc: Vec<Option<RoaringBitmap>> = vec![None; node_count];
+        let mut policy_resource_desc:  Vec<Option<RoaringBitmap>> = vec![None; node_count];
+        let mut effective_principal:   Vec<Option<RoaringBitmap>> = vec![None; node_count];
+        let mut effective_resource:    Vec<Option<RoaringBitmap>> = vec![None; node_count];
+
+        for idx in 0..node_count {
+            // --- Policy: copy targets (Copy type) and release borrow before cross-field reads ---
+            let policy_targets = match &self.nodes[idx] {
+                IndexedNode::Policy(p) => Some((p.principal_target, p.resource_target)),
+                _ => None,
+            };
+            if let Some((pt, rt)) = policy_targets {
+                if let IndexedPolicyTarget::EntityWithDescendants(tidx) = pt {
+                    policy_principal_desc[idx] = Some(self.entity_descendants[tidx as usize].clone());
+                }
+                if let IndexedPolicyTarget::EntityWithDescendants(tidx) = rt {
+                    policy_resource_desc[idx] = Some(self.entity_descendants[tidx as usize].clone());
+                }
+                continue;
+            }
+
+            // --- Entity: clone needed fields and release borrow before ancestor walk ---
+            let entity_data = match &self.nodes[idx] {
+                IndexedNode::Entity(e) => Some((
+                    e.ancestors.clone(),
+                    e.entity_type,
+                    e.principal_of_policies.clone(),
+                    e.resource_of_policies.clone(),
+                )),
+                _ => None,
+            };
+            let Some((ancestors, entity_type, principal_of, resource_of)) = entity_data else { continue };
+
+            let mut acc_p = self.all_principal_policies.clone();
+            if let Some(ref direct) = principal_of { acc_p |= direct; }
+            let mut acc_r = self.all_resource_policies.clone();
+            if let Some(ref direct) = resource_of { acc_r |= direct; }
+
+            for anc_idx in ancestors.iter() {
+                if let Some(IndexedNode::Entity(anc)) = self.nodes.get(anc_idx as usize) {
+                    if let Some(p) = &anc.principal_of_policies {
+                        acc_p |= p & &self.descendant_principal_policies;
+                    }
+                    if let Some(r) = &anc.resource_of_policies {
+                        acc_r |= r & &self.descendant_resource_policies;
+                    }
+                }
+            }
+
+            if let Some(et) = self.indexed_entity_types.get(&entity_type) {
+                acc_p |= &et.policies_targeting_principals_of_type;
+                acc_r |= &et.policies_targeting_resources_of_type;
+            }
+
+            effective_principal[idx] = Some(acc_p);
+            effective_resource[idx]  = Some(acc_r);
+        }
+
+        // Write back.
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            match node {
+                IndexedNode::Policy(p) => {
+                    p.principal_descendants = policy_principal_desc[idx].take();
+                    p.resource_descendants  = policy_resource_desc[idx].take();
+                }
+                IndexedNode::Entity(e) => {
+                    e.effective_principal_policies = effective_principal[idx].take();
+                    e.effective_resource_policies  = effective_resource[idx].take();
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn into_snapshot(self, uuid_to_index: RapidHashMap<Uuid, u32>) -> Snapshot {
         Snapshot {
             uuid_to_index,
@@ -301,7 +396,8 @@ impl SnapshotBuilder {
     /// Returns [`ArborError::EntityNotFound`] if a policy references a
     /// principal or resource UUID not present in the graph.
     pub fn build(graph: &Graph) -> ArborResult<Snapshot> {
-        let mut state = BuildState::new(graph.nodes.len());
+        let entity_descendants = compute_all_descendants(&graph.children, graph.nodes.len());
+        let mut state = BuildState::new(graph.nodes.len(), entity_descendants);
 
         // Copy entity type names
         for (id, name) in &graph.entity_type_names {
@@ -320,6 +416,7 @@ impl SnapshotBuilder {
         }
 
         state.apply_deferred();
+        state.compute_derived_fields();
         Ok(state.into_snapshot(graph.uuid_to_index.clone()))
     }
 }

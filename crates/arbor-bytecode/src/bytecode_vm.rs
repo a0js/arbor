@@ -819,10 +819,11 @@ mod tests {
             idx: 0,
             attributes: Attributes::new(),
             entity_type: EntityTypeId::new(1),
-            descendants: RoaringBitmap::new(),
             ancestors: RoaringBitmap::new(),
             principal_of_policies: None,
             resource_of_policies: None,
+            effective_principal_policies: None,
+            effective_resource_policies: None,
         }
     }
 
@@ -831,10 +832,11 @@ mod tests {
             idx,
             attributes: Attributes::new(),
             entity_type: EntityTypeId::new(1),
-            descendants: RoaringBitmap::new(),
             ancestors: RoaringBitmap::new(),
             principal_of_policies: None,
             resource_of_policies: None,
+            effective_principal_policies: None,
+            effective_resource_policies: None,
         }
     }
 

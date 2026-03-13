@@ -115,7 +115,6 @@ fn test_single_entity_indexes() {
 
     // No parents → ancestors has exactly one entry (self)
     assert_eq!(ie.ancestors.len(), 1);
-    assert!(ie.descendants.is_empty());
 
     // entity type index
     let et = snapshot.indexed_entity_types.get(&type_id(1)).expect("entity type missing");
@@ -152,17 +151,9 @@ fn test_parent_child_hierarchy() {
     assert!(child_ie.ancestors.contains(parent_idx), "child must include parent");
     assert_eq!(child_ie.ancestors.len(), 2);
 
-    // Parent's descendants include: child (not self in descendants)
-    assert!(parent_ie.descendants.contains(child_idx), "parent must include child in descendants");
-    // Parent's descendants do NOT include self
-    assert!(!parent_ie.descendants.contains(parent_idx));
-
     // Parent's ancestors: self only (no grandparents)
     assert!(parent_ie.ancestors.contains(parent_idx));
     assert_eq!(parent_ie.ancestors.len(), 1);
-
-    // Child has no descendants
-    assert!(child_ie.descendants.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -202,12 +193,11 @@ fn test_diamond_hierarchy() {
     assert!(d_ie.ancestors.contains(a_idx), "D must contain A");
     assert_eq!(d_ie.ancestors.len(), 4);
 
-    // A's descendants: B, C, D
+    // A has no entity-type policy so effective_principal_policies should be Some(empty).
     let a_ie = snapshot.get_entity(a_idx).unwrap();
-    assert!(a_ie.descendants.contains(b_idx));
-    assert!(a_ie.descendants.contains(c_idx));
-    assert!(a_ie.descendants.contains(d_idx));
-    assert_eq!(a_ie.descendants.len(), 3);
+    // No policies exist in this graph — effective sets should be Some(empty).
+    assert_eq!(a_ie.effective_principal_policies.as_ref().map(|b| b.len()), Some(0));
+    assert_eq!(a_ie.effective_resource_policies.as_ref().map(|b| b.len()), Some(0));
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +343,25 @@ fn test_entity_with_descendants_principal() {
     let p_idx = *snapshot.uuid_to_index.get(&principal_id).unwrap();
     let principal_ie = snapshot.get_entity(p_idx).unwrap();
     assert!(principal_ie.principal_of_policies.as_ref().unwrap().contains(policy_idx));
+
+    // Policy must have principal_descendants set (EntityWithDescendants principal)
+    // principal_id has no children → descendants bitmap is empty but Some
+    let ip = snapshot.get_policy(policy_idx).unwrap();
+    assert!(
+        ip.principal_descendants.is_some(),
+        "principal_descendants must be Some for EntityWithDescendants principal target"
+    );
+    // resource target is Entity, not EntityWithDescendants → resource_descendants must be None
+    assert!(
+        ip.resource_descendants.is_none(),
+        "resource_descendants must be None for Entity resource target"
+    );
+
+    // The principal entity's effective_principal_policies must contain the policy
+    assert!(
+        principal_ie.effective_principal_policies.as_ref().unwrap().contains(policy_idx),
+        "effective_principal_policies must contain the policy"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +711,24 @@ fn test_entity_with_descendants_resource() {
     let r_idx = *snapshot.uuid_to_index.get(&root_resource_id).unwrap();
     let resource_ie = snapshot.get_entity(r_idx).unwrap();
     assert!(resource_ie.resource_of_policies.as_ref().unwrap().contains(policy_idx));
+
+    // Policy must have resource_descendants set (EntityWithDescendants resource target)
+    let ip = snapshot.get_policy(policy_idx).unwrap();
+    assert!(
+        ip.resource_descendants.is_some(),
+        "resource_descendants must be Some for EntityWithDescendants resource target"
+    );
+    // principal target is Entity, not EntityWithDescendants → principal_descendants must be None
+    assert!(
+        ip.principal_descendants.is_none(),
+        "principal_descendants must be None for Entity principal target"
+    );
+
+    // The resource entity's effective_resource_policies must contain the policy
+    assert!(
+        resource_ie.effective_resource_policies.as_ref().unwrap().contains(policy_idx),
+        "effective_resource_policies must contain the policy"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -744,11 +771,11 @@ fn test_entity_type_nodes_of_type() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 16: get_policies_for_resource smoke test (uses Snapshot helper)
+// Test 16: effective_resource_policies smoke test
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_get_policies_for_resource() {
+fn test_effective_resource_policies() {
     let mut graph = Graph::new();
     let principal_id = Uuid::new_v4();
     let resource_id = Uuid::new_v4();
@@ -771,11 +798,13 @@ fn test_get_policies_for_resource() {
     let r_idx = *snapshot.uuid_to_index.get(&resource_id).unwrap();
     let policy_idx = *graph.uuid_to_index.get(&policy_id).unwrap();
 
-    let policies = snapshot
-        .get_policies_for_resource(r_idx)
-        .expect("get_policies_for_resource failed");
+    let resource_ie = snapshot.get_entity(r_idx).expect("resource entity missing");
+    let policies = resource_ie
+        .effective_resource_policies
+        .as_ref()
+        .expect("effective_resource_policies must be Some");
 
-    assert!(policies.contains(policy_idx), "policy must appear in resource's policy set");
+    assert!(policies.contains(policy_idx), "policy must appear in resource's effective policy set");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 use std::ops::Sub;
 use rapidhash::RapidHashMap;
-use roaring::{MultiOps, RoaringBitmap};
+use roaring::RoaringBitmap;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use arbor_types::{
@@ -158,60 +158,9 @@ impl Snapshot {
         }
     }
 
-    pub fn get_policies_for_resource(&self, resource_idx: u32) -> ArborResult<RoaringBitmap> {
-        let resource = self.get_entity(resource_idx)
-            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", resource_idx)))?;
-        let mut policies = vec![&self.all_resource_policies];
-
-        if let Some(direct) = &resource.resource_of_policies {
-            policies.push(direct);
-        }
-
-        let ancestral = resource.ancestors.iter()
-            .filter_map(|anc_idx| {
-                self.get_entity(anc_idx)
-                    .and_then(|e| e.resource_of_policies.as_ref())
-            })
-            .union() & &self.descendant_resource_policies;
-
-        policies.push(&ancestral);
-
-        if let Some(et) = self.indexed_entity_types.get(&resource.entity_type) {
-            policies.push(&et.policies_targeting_resources_of_type);
-        }
-
-        Ok(policies.union())
-    }
-
-    pub fn get_policies_for_principal(&self, principal_idx: u32) -> ArborResult<RoaringBitmap> {
-        let principal = self.get_entity(principal_idx)
-            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", principal_idx)))?;
-        let mut policies = vec![&self.all_principal_policies];
-
-        if let Some(direct) = &principal.principal_of_policies {
-            policies.push(direct);
-        }
-
-        let ancestral = principal.ancestors.iter()
-            .filter_map(|anc_idx| {
-                self.get_entity(anc_idx)
-                    .and_then(|e| e.principal_of_policies.as_ref())
-            })
-            .union() & &self.descendant_principal_policies;
-
-        policies.push(&ancestral);
-
-        if let Some(et) = self.indexed_entity_types.get(&principal.entity_type) {
-            policies.push(&et.policies_targeting_principals_of_type);
-        }
-
-        Ok(policies.union())
-    }
-
-    pub fn get_policies_for_action(&self, action_idx: u32) -> ArborResult<RoaringBitmap> {
+    pub fn get_policies_for_action(&self, action_idx: u32) -> ArborResult<&RoaringBitmap> {
         self.action_to_policies
             .get(&action_idx)
-            .cloned()
             .ok_or_else(|| ArborError::EntityNotFound(format!("Action not found {}", action_idx)))
     }
 
@@ -235,10 +184,14 @@ impl Snapshot {
                 IndexedPolicyTarget::Entity(idx) => {
                     if et.nodes_of_type.contains(idx) { acc.insert(idx); }
                 }
-                IndexedPolicyTarget::EntityWithDescendants(idx) => {
-                    let e = self.get_entity(idx)
-                        .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", idx)))?;
-                    acc |= &et.nodes_of_type & &e.descendants;
+                IndexedPolicyTarget::EntityWithDescendants(_idx) => {
+                    let descendants = match side {
+                        PolicySide::Principal => policy.principal_descendants.as_ref(),
+                        PolicySide::Resource => policy.resource_descendants.as_ref(),
+                    };
+                    if let Some(desc) = descendants {
+                        acc |= &et.nodes_of_type & desc;
+                    }
                 }
                 IndexedPolicyTarget::EntityType(tid) => {
                     if tid == entity_type_id { return Ok(et.nodes_of_type.clone()); }
@@ -249,11 +202,11 @@ impl Snapshot {
         Ok(acc)
     }
 
-    /// Returns the intersection of `mask` with the effective policies for `entity_idx` on `side`.
+    /// Returns the intersection of `mask` with the precomputed effective policies for
+    /// `entity_idx` on `side`.
     ///
-    /// Equivalent to `get_policies_for_resource/principal` followed by an intersection, but
-    /// intersects at each step and skips ancestor walking entirely when `mask` contains no
-    /// `EntityWithDescendants` policies.
+    /// Uses the `effective_principal_policies` / `effective_resource_policies` fields
+    /// computed at index time, so this is a single bitmap intersection.
     pub fn get_effective_policies_intersected(
         &self,
         entity_idx: u32,
@@ -262,52 +215,16 @@ impl Snapshot {
     ) -> ArborResult<RoaringBitmap> {
         let entity = self.get_entity(entity_idx)
             .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", entity_idx)))?;
-
-        let (direct, descendant_mask_src, type_policies) = match side {
-            PolicySide::Resource => (
-                entity.resource_of_policies.as_ref(),
-                &self.descendant_resource_policies,
-                self.indexed_entity_types.get(&entity.entity_type)
-                    .map(|et| &et.policies_targeting_resources_of_type),
-            ),
-            PolicySide::Principal => (
-                entity.principal_of_policies.as_ref(),
-                &self.descendant_principal_policies,
-                self.indexed_entity_types.get(&entity.entity_type)
-                    .map(|et| &et.policies_targeting_principals_of_type),
-            ),
+        let effective = match side {
+            PolicySide::Principal => entity.effective_principal_policies.as_ref(),
+            PolicySide::Resource => entity.effective_resource_policies.as_ref(),
         };
-
-        let mut result = RoaringBitmap::new();
-
-        if let Some(d) = direct {
-            result |= mask & d;
-        }
-        if let Some(t) = type_policies {
-            result |= mask & t;
-        }
-
-        let ancestor_mask = mask & descendant_mask_src;
-        if !ancestor_mask.is_empty() {
-            for anc_idx in entity.ancestors.iter() {
-                if let Some(anc) = self.get_entity(anc_idx) {
-                    let anc_direct = match side {
-                        PolicySide::Resource => anc.resource_of_policies.as_ref(),
-                        PolicySide::Principal => anc.principal_of_policies.as_ref(),
-                    };
-                    if let Some(p) = anc_direct {
-                        result |= &ancestor_mask & p;
-                    }
-                }
-            }
-        }
-
-        Ok(result)
+        Ok(effective.map(|e| e & mask).unwrap_or_default())
     }
 
-    pub fn get_actions_for_policy(&self, policy_idx: u32) -> ArborResult<RoaringBitmap> {
+    pub fn get_actions_for_policy(&self, policy_idx: u32) -> ArborResult<&RoaringBitmap> {
         self.get_policy(policy_idx)
-            .map(|p| p.actions.clone())
+            .map(|p| &p.actions)
             .ok_or_else(|| ArborError::EntityNotFound(format!("Policy not found {}", policy_idx)))
     }
 

@@ -1,6 +1,6 @@
 use rapidhash::RapidHashMap;
 use roaring::RoaringBitmap;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 /// Compute all transitive ancestors of `entity_idx` by following `parents`.
 ///
@@ -31,27 +31,57 @@ pub fn compute_ancestors(
     ancestors
 }
 
-/// Compute all transitive descendants of `entity_idx` by following `children`.
+/// Compute transitive descendants for every node in one topological pass.
 ///
-/// The entity itself is NOT included.
-pub fn compute_descendants(
+/// Processes nodes leaves-first so each edge is visited exactly once, giving
+/// O(N + E) total work instead of O(N × avg_subtree_size).
+///
+/// Returns a `Vec<RoaringBitmap>` of length `node_count`; index `i` holds
+/// all transitive descendants of node `i`.  The node itself is NOT included.
+pub fn compute_all_descendants(
     children: &RapidHashMap<u32, HashSet<u32>>,
-    entity_idx: u32,
-) -> RoaringBitmap {
-    let mut descendants = RoaringBitmap::new();
-    let mut stack = vec![entity_idx];
+    node_count: usize,
+) -> Vec<RoaringBitmap> {
+    // remaining_children[i]: how many children of i are not yet processed.
+    let mut remaining_children = vec![0u32; node_count];
+    // notify_parents[i]: parents to update when node i is done.
+    let mut notify_parents: Vec<Vec<u32>> = vec![Vec::new(); node_count];
 
-    while let Some(idx) = stack.pop() {
-        if let Some(child_indices) = children.get(&idx) {
-            for &child_idx in child_indices {
-                if descendants.insert(child_idx) {
-                    stack.push(child_idx);
-                }
+    for (&parent, child_set) in children {
+        let p = parent as usize;
+        if p >= node_count {
+            continue;
+        }
+        remaining_children[p] = child_set.len() as u32;
+        for &child in child_set {
+            let c = child as usize;
+            if c < node_count {
+                notify_parents[c].push(parent);
             }
         }
     }
 
-    descendants
+    let mut result = vec![RoaringBitmap::new(); node_count];
+
+    // Seed with leaves: nodes that have no children.
+    let mut queue: VecDeque<u32> = (0..node_count as u32)
+        .filter(|&i| remaining_children[i as usize] == 0)
+        .collect();
+
+    while let Some(idx) = queue.pop_front() {
+        let desc = result[idx as usize].clone();
+        for &parent in &notify_parents[idx as usize] {
+            let p = parent as usize;
+            result[p] |= &desc;
+            result[p].insert(idx);
+            remaining_children[p] -= 1;
+            if remaining_children[p] == 0 {
+                queue.push_back(parent);
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -92,22 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_descendants_success() {
-        // root(0) -> parent(1) -> child(2)
-        let c = children(&[(0, 1), (1, 2)]);
-        let descendants = compute_descendants(&c, 0);
-        assert_eq!(descendants.len(), 2);
-        assert!(descendants.contains(1));
-        assert!(descendants.contains(2));
-    }
-
-    #[test]
-    fn test_compute_descendants_leaf_has_none() {
-        let c = children(&[(0, 1)]);
-        assert!(compute_descendants(&c, 1).is_empty());
-    }
-
-    #[test]
     fn test_compute_ancestors_diamond_pattern() {
         // A(0) has parents B(1) and C(2); B(1) has parent C(2)
         let p = parents(&[(0, 1), (0, 2), (1, 2)]);
@@ -117,13 +131,4 @@ mod tests {
         assert!(ancestors.contains(2));
     }
 
-    #[test]
-    fn test_compute_descendants_diamond_pattern() {
-        // C(2) has children B(1) and A(0); B(1) has child A(0)
-        let c = children(&[(2, 1), (2, 0), (1, 0)]);
-        let descendants = compute_descendants(&c, 2);
-        assert_eq!(descendants.len(), 2);
-        assert!(descendants.contains(1));
-        assert!(descendants.contains(0));
-    }
 }

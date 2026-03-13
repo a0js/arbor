@@ -100,4 +100,10 @@ pub struct IndexedPolicy {
     pub conditions: Option<CompiledCondition>,
     pub is_forbidding: bool,
     pub is_conditional: bool,
+    /// Precomputed transitive descendants of the principal target entity.
+    /// `Some` only when `principal_target` is `EntityWithDescendants`; `None` otherwise.
+    pub principal_descendants: Option<RoaringBitmap>,
+    /// Precomputed transitive descendants of the resource target entity.
+    /// `Some` only when `resource_target` is `EntityWithDescendants`; `None` otherwise.
+    pub resource_descendants: Option<RoaringBitmap>,
 }
