@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 arbor-types = { path = "../arbor-types" }
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
 rapidhash = "4.1.1"
-roaring = "0.11.2"
+roaring = { version = "0.11.2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+lz4_flex = "0.11"
+thiserror = "2"

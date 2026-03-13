@@ -2,17 +2,18 @@ use ipnet::IpNet;
 use std::net::IpAddr;
 use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 use crate::attributes::AttributeValue;
 use crate::conditions::{VariableRef, VariableScope};
 use crate::ids::EntityTypeId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResolvedEntityIndex {
     Variable(VariableRef),
     Direct(u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OpCode {
     // Stack manipulation
     PushInteger(i64),
@@ -87,7 +88,7 @@ pub enum OpCode {
     Jump(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledCondition {
     pub instructions: Vec<OpCode>,
     pub dependencies: Vec<VariableRef>,

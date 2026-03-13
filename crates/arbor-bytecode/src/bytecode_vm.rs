@@ -42,16 +42,14 @@ pub enum StackValue {
 }
 
 /// Bytecode VM for condition evaluation
-pub struct BytecodeVM<'a> {
+pub struct BytecodeVM {
     stack: Vec<StackValue>,
-    context: &'a EvaluationContext<'a>,
 }
 
-impl<'a> BytecodeVM<'a> {
-    pub fn new(context: &'a EvaluationContext<'a>) -> Self {
+impl BytecodeVM {
+    pub fn new() -> Self {
         Self {
             stack: Vec::with_capacity(16),
-            context,
         }
     }
 
@@ -60,7 +58,7 @@ impl<'a> BytecodeVM<'a> {
     /// Returns `True`/`False` on success, or `Invalid` on type errors or
     /// compiler invariant violations. Missing attributes evaluate to `false`
     /// at comparison boundaries; they are not errors.
-    pub fn evaluate(&mut self, instructions: &[OpCode]) -> ConditionResult {
+    pub fn evaluate(&mut self, instructions: &[OpCode], ctx: &EvaluationContext<'_>) -> ConditionResult {
         self.stack.clear();
         let mut pc: usize = 0;
 
@@ -139,7 +137,7 @@ impl<'a> BytecodeVM<'a> {
                     }
                 }
                 other => {
-                    if let Err(e) = self.execute_instruction(other) {
+                    if let Err(e) = self.execute_instruction(other, ctx) {
                         return ConditionResult::Invalid(vec![EvaluationError::ExecutionError(
                             format!("pc={}: {}", pc, e),
                         )]);
@@ -170,7 +168,7 @@ impl<'a> BytecodeVM<'a> {
     }
 
 
-    fn execute_instruction(&mut self, instruction: &OpCode) -> Result<(), String> {
+    fn execute_instruction(&mut self, instruction: &OpCode, ctx: &EvaluationContext<'_>) -> Result<(), String> {
         match instruction {
             OpCode::PushInteger(i) => {
                 self.stack.push(StackValue::Integer(*i));
@@ -204,7 +202,7 @@ impl<'a> BytecodeVM<'a> {
                 self.stack.push(StackValue::EntityRef(*idx));
                 Ok(())
             }
-            OpCode::PushVariable(var_ref) => self.execute_push_variable(var_ref),
+            OpCode::PushVariable(var_ref) => self.execute_push_variable(var_ref, ctx),
             OpCode::PushSet(values) => {
                 self.stack.push(StackValue::Set(values.clone()));
                 Ok(())
@@ -222,14 +220,14 @@ impl<'a> BytecodeVM<'a> {
             OpCode::Contains => self.execute_contains(),
             OpCode::ContainsAll => self.execute_contains_all(),
             OpCode::ContainsAny => self.execute_contains_any(),
-            OpCode::HasAttribute(var_ref) => self.execute_has_attribute(var_ref),
+            OpCode::HasAttribute(var_ref) => self.execute_has_attribute(var_ref, ctx),
             OpCode::StartsWith => self.execute_starts_with(),
             OpCode::EndsWith => self.execute_ends_with(),
             OpCode::StringContains => self.execute_string_contains(),
             OpCode::Like => self.execute_like(),
-            OpCode::IsType(scope, type_id) => self.execute_is_type(scope, type_id),
+            OpCode::IsType(scope, type_id) => self.execute_is_type(scope, type_id, ctx),
             OpCode::InNetwork => self.execute_in_network(),
-            OpCode::InHierarchy(descendant, ancestor) => self.execute_in_hierarchy(descendant, ancestor),
+            OpCode::InHierarchy(descendant, ancestor) => self.execute_in_hierarchy(descendant, ancestor, ctx),
             OpCode::JumpIfFalse(_) | OpCode::Jump(_) | OpCode::JumpIfTrue(_) => {
                 Err("control flow shouldn't evaluate here".into())
             }
@@ -238,8 +236,8 @@ impl<'a> BytecodeVM<'a> {
 
     // ===== Stack Operations =====
 
-    fn execute_push_variable(&mut self, var_ref: &VariableRef) -> Result<(), String> {
-        let value = match self.resolve_variable(var_ref) {
+    fn execute_push_variable(&mut self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Result<(), String> {
+        let value = match self.resolve_variable(var_ref, ctx) {
             Some(AttributeValue::String(s)) => StackValue::String(s),
             Some(AttributeValue::Float(f)) => StackValue::Float(f),
             Some(AttributeValue::Integer(i)) => StackValue::Integer(i),
@@ -258,16 +256,16 @@ impl<'a> BytecodeVM<'a> {
 
     /// Resolve an attribute path to its value. Returns `None` if the path does
     /// not exist or if context attributes are absent for a Context-scoped variable.
-    fn resolve_variable(&self, var_ref: &VariableRef) -> Option<AttributeValue> {
+    fn resolve_variable(&self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Option<AttributeValue> {
         let base = match var_ref.scope {
-            VariableScope::Principal => &self.context.principal.attributes,
-            VariableScope::Resource => &self.context.resource.attributes,
-            VariableScope::Context => self.context.context_attrs?,
+            VariableScope::Principal => &ctx.principal.attributes,
+            VariableScope::Resource => &ctx.resource.attributes,
+            VariableScope::Context => ctx.context_attrs?,
         };
         if var_ref.path.is_empty() {
             return match var_ref.scope {
-                VariableScope::Principal => Some(AttributeValue::EntityRef(self.context.principal.idx)),
-                VariableScope::Resource => Some(AttributeValue::EntityRef(self.context.resource.idx)),
+                VariableScope::Principal => Some(AttributeValue::EntityRef(ctx.principal.idx)),
+                VariableScope::Resource => Some(AttributeValue::EntityRef(ctx.resource.idx)),
                 VariableScope::Context => None,
             }
         }
@@ -276,8 +274,8 @@ impl<'a> BytecodeVM<'a> {
 
     // ===== Attribute Operations =====
 
-    fn execute_has_attribute(&mut self, var_ref: &VariableRef) -> Result<(), String> {
-        let exists = self.resolve_variable(var_ref).is_some();
+    fn execute_has_attribute(&mut self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Result<(), String> {
+        let exists = self.resolve_variable(var_ref, ctx).is_some();
         self.stack.push(StackValue::Bool(exists));
         Ok(())
     }
@@ -580,11 +578,11 @@ impl<'a> BytecodeVM<'a> {
 
     // ===== Entity Type Check =====
 
-    fn execute_in_hierarchy(&mut self, descendant: &ResolvedEntityIndex, ancestor: &ResolvedEntityIndex) -> Result<(), String> {
+    fn execute_in_hierarchy(&mut self, descendant: &ResolvedEntityIndex, ancestor: &ResolvedEntityIndex, ctx: &EvaluationContext<'_>) -> Result<(), String> {
         let desc_idx = match descendant {
             ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
             ResolvedEntityIndex::Variable(var_ref) => {
-                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref) else {
+                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
                     return Err("Variable must resolve to EntityRef".into());
                 };
                 Ok(ent)
@@ -594,14 +592,14 @@ impl<'a> BytecodeVM<'a> {
         let anc_idx = match ancestor {
             ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
             ResolvedEntityIndex::Variable(var_ref) => {
-                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref) else {
+                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
                     return Err("Variable must resolve to EntityRef".into());
                 };
                 Ok(ent)
             },
         }?;
 
-        let Some(desc) = self.context.entities.get_entity(desc_idx) else {
+        let Some(desc) = ctx.entities.get_entity(desc_idx) else {
             return Err("Entity not found".into());
         };
 
@@ -637,10 +635,10 @@ impl<'a> BytecodeVM<'a> {
 
     /// Pushes `Bool(true)` if the entity at `scope` has `entity_type == type_id`.
     /// Never produces Missing. The entity is always present in the evaluation context.
-    fn execute_is_type(&mut self, scope: &VariableScope, type_id: &EntityTypeId) -> Result<(), String> {
+    fn execute_is_type(&mut self, scope: &VariableScope, type_id: &EntityTypeId, ctx: &EvaluationContext<'_>) -> Result<(), String> {
         let entity_type = match scope {
-            VariableScope::Principal => self.context.principal.entity_type,
-            VariableScope::Resource => self.context.resource.entity_type,
+            VariableScope::Principal => ctx.principal.entity_type,
+            VariableScope::Resource => ctx.resource.entity_type,
             VariableScope::Context => return Err("IsType is not valid on Context scope".into()),
         };
         self.stack.push(StackValue::Bool(entity_type == *type_id));
@@ -873,12 +871,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
             OpCode::PushInteger(42),
             OpCode::Eq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -887,12 +885,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
             OpCode::PushInteger(43),
             OpCode::Eq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -901,7 +899,7 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushInteger(10),
             OpCode::PushInteger(20),
@@ -910,7 +908,7 @@ mod tests {
             OpCode::PushInteger(5),
             OpCode::Eq,
             OpCode::And,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -919,7 +917,7 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         // (10 > 20) OR (5 == 5) → false OR true → true
         let result = vm.evaluate(&[
             OpCode::PushInteger(10),
@@ -929,7 +927,7 @@ mod tests {
             OpCode::PushInteger(5),
             OpCode::Eq,
             OpCode::Or,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -938,14 +936,14 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         // NOT(5 == 10) → NOT(false) → true
         let result = vm.evaluate(&[
             OpCode::PushInteger(5),
             OpCode::PushInteger(10),
             OpCode::Eq,
             OpCode::Not,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -955,33 +953,33 @@ mod tests {
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushInteger(10),
             OpCode::PushInteger(20),
             OpCode::Lt,
-        ]), ConditionResult::True);
+        ], &ctx), ConditionResult::True);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushInteger(20),
             OpCode::PushInteger(20),
             OpCode::Lte,
-        ]), ConditionResult::True);
+        ], &ctx), ConditionResult::True);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushInteger(30),
             OpCode::PushInteger(20),
             OpCode::Gt,
-        ]), ConditionResult::True);
+        ], &ctx), ConditionResult::True);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushInteger(20),
             OpCode::PushInteger(20),
             OpCode::Gte,
-        ]), ConditionResult::True);
+        ], &ctx), ConditionResult::True);
     }
 
     // ===== Missing Attribute Tests =====
@@ -991,12 +989,12 @@ mod tests {
         let principal = make_test_entity(); // no attributes
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("gold".into()),
             OpCode::Eq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1008,12 +1006,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("restricted".into()),
             OpCode::Neq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1022,12 +1020,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushInteger(10),
             OpCode::Lt,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1036,12 +1034,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushSet(vec![AttributeValue::String("admin".into())]),
             OpCode::In,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1051,11 +1049,11 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::Not,
-        ]);
+        ], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1065,8 +1063,8 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::PushVariable(var_ref_principal(99))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::PushVariable(var_ref_principal(99))], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1077,8 +1075,8 @@ mod tests {
         let principal = make_entity_with_attr(1, AttributeValue::Bool(true));
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(1))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(1))], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1087,8 +1085,8 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(99))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(99))], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1099,12 +1097,12 @@ mod tests {
         let principal = make_entity_with_attr(1, AttributeValue::String("gold".into()));
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("gold".into()),
             OpCode::Eq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1114,7 +1112,7 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushBool(true),
             OpCode::PushBool(true),
@@ -1123,7 +1121,7 @@ mod tests {
             OpCode::PushString("gold".into()),
             OpCode::Eq,
             OpCode::And,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1134,7 +1132,7 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushSet(vec![
                 AttributeValue::Integer(5),
@@ -1144,7 +1142,7 @@ mod tests {
                 AttributeValue::Float(ordered_float::OrderedFloat(5.0)),
             ]),
             OpCode::ContainsAll,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1153,7 +1151,7 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("editor".into()),
             OpCode::PushSet(vec![
@@ -1161,7 +1159,7 @@ mod tests {
                 AttributeValue::String("editor".into()),
             ]),
             OpCode::In,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1170,12 +1168,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
             OpCode::PushInteger(42),
             OpCode::Neq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1184,12 +1182,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushInteger(42),
             OpCode::PushInteger(99),
             OpCode::Neq,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1200,12 +1198,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
             OpCode::PushString("hello".into()),
             OpCode::StartsWith,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1214,12 +1212,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
             OpCode::PushString("world".into()),
             OpCode::StartsWith,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1228,12 +1226,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
             OpCode::PushString("world".into()),
             OpCode::EndsWith,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1242,12 +1240,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
             OpCode::PushString("lo wo".into()),
             OpCode::StringContains,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1257,33 +1255,33 @@ mod tests {
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("prefix".into()),
             OpCode::StartsWith,
-        ]), ConditionResult::False);
+        ], &ctx), ConditionResult::False);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("suffix".into()),
             OpCode::EndsWith,
-        ]), ConditionResult::False);
+        ], &ctx), ConditionResult::False);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("needle".into()),
             OpCode::StringContains,
-        ]), ConditionResult::False);
+        ], &ctx), ConditionResult::False);
 
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         assert_eq!(vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
             OpCode::PushString("*".into()),
             OpCode::Like,
-        ]), ConditionResult::False);
+        ], &ctx), ConditionResult::False);
     }
 
     // ===== Like / Glob Tests =====
@@ -1335,12 +1333,12 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushString("hello world".into()),
             OpCode::PushString("hello*".into()),
             OpCode::Like,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1352,8 +1350,8 @@ mod tests {
         principal.entity_type = EntityTypeId::new(42);
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(42))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(42))], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1363,8 +1361,8 @@ mod tests {
         principal.entity_type = EntityTypeId::new(42);
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(99))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Principal, EntityTypeId::new(99))], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1374,8 +1372,8 @@ mod tests {
         let mut resource = make_test_entity();
         resource.entity_type = EntityTypeId::new(7);
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Resource, EntityTypeId::new(7))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Resource, EntityTypeId::new(7))], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1384,8 +1382,8 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
-        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Context, EntityTypeId::new(1))]);
+        let mut vm = BytecodeVM::new();
+        let result = vm.evaluate(&[OpCode::IsType(VariableScope::Context, EntityTypeId::new(1))], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1405,11 +1403,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(principal.clone());
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
             ResolvedEntityIndex::Direct(5),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1420,11 +1418,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(principal.clone());
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
             ResolvedEntityIndex::Direct(20),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1434,11 +1432,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(principal.clone());
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(scope_var(VariableScope::Principal)),
             ResolvedEntityIndex::Direct(99),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1449,11 +1447,11 @@ mod tests {
         let resource = make_entity_with_ancestors(1, &[7]);
         let resolver = MapResolver::new().insert(resource.clone());
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(scope_var(VariableScope::Resource)),
             ResolvedEntityIndex::Direct(7),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1463,11 +1461,11 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(scope_var(VariableScope::Context)),
             ResolvedEntityIndex::Direct(1),
-        )]);
+        )], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1479,7 +1477,7 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(principal.clone());
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::IsType(VariableScope::Principal, EntityTypeId::new(42)),
             OpCode::InHierarchy(
@@ -1487,7 +1485,7 @@ mod tests {
                 ResolvedEntityIndex::Direct(100),
             ),
             OpCode::And,
-        ]);
+        ], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1506,11 +1504,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(manager);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
             ResolvedEntityIndex::Direct(50),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 
@@ -1522,11 +1520,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new().insert(manager);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
             ResolvedEntityIndex::Direct(50),
-        )]);
+        )], &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1537,11 +1535,11 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_entity_at(1);
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
             ResolvedEntityIndex::Direct(50),
-        )]);
+        )], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1553,11 +1551,11 @@ mod tests {
         let resource = make_entity_at(1);
         let resolver = MapResolver::new(); // empty — index 999 not registered
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
             ResolvedEntityIndex::Direct(50),
-        )]);
+        )], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1567,11 +1565,11 @@ mod tests {
         let principal = make_entity_with_attr(1, AttributeValue::String("not-an-entity".into()));
         let resource = make_entity_at(1);
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
             ResolvedEntityIndex::Direct(50),
-        )]);
+        )], &ctx);
         assert!(matches!(result, ConditionResult::Invalid(_)));
     }
 
@@ -1582,7 +1580,7 @@ mod tests {
         let principal = make_test_entity(); // has nothing
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
 
         let instructions = vec![
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1596,7 +1594,7 @@ mod tests {
             OpCode::PushBool(false),
         ];
 
-        let result = vm.evaluate(&instructions);
+        let result = vm.evaluate(&instructions, &ctx);
         assert_eq!(result, ConditionResult::False);
     }
 
@@ -1605,11 +1603,11 @@ mod tests {
         let principal = make_test_entity();
         let resource = make_test_entity();
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut _vm_placeholder = BytecodeVM::new(&ctx);
+        let mut _vm_placeholder = BytecodeVM::new();
 
         let principal = make_entity_with_attr(2, AttributeValue::String("value".into()));
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-        let mut vm = BytecodeVM::new(&ctx);
+        let mut vm = BytecodeVM::new();
 
         let instructions = vec![
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1623,7 +1621,7 @@ mod tests {
             OpCode::PushBool(true),
         ];
 
-        let result = vm.evaluate(&instructions);
+        let result = vm.evaluate(&instructions, &ctx);
         assert_eq!(result, ConditionResult::True);
     }
 }

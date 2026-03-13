@@ -1,15 +1,18 @@
 use std::marker::PhantomData;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntityTypeMarker;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, Serialize, Deserialize)]
 #[derive(Ord)]
 #[derive(PartialOrd)]
 pub struct AttributeNameMarker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct StringId<T>(pub(crate) u32, PhantomData<T>);
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct StringId<T>(pub(crate) u32, #[serde(skip)] PhantomData<T>);
 
 impl<T> StringId<T> {
     /// Create a new string ID

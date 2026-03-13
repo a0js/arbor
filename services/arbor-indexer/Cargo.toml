@@ -11,6 +11,7 @@ arbor-bytecode = { path = "../../crates/arbor-bytecode" }
 uuid = { version = "1.18.1", features = ["v4"] }
 roaring = "0.11.2"
 rapidhash = "4.1.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 
 [dev-dependencies]
 ipnet = "2.11.0"

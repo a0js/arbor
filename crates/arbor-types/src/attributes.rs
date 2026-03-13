@@ -4,8 +4,9 @@ use ipnet::IpNet;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AttributeValue {
     String(String),
     Float(OrderedFloat<f64>),
@@ -20,7 +21,7 @@ pub enum AttributeValue {
 }
 
 /// Attributes wrapper that provides efficient nested object support
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attributes {
     data: BTreeMap<AttributeNameId, AttributeValue>,
 }

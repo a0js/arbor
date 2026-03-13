@@ -4,3 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arbor-index-snapshot = { path = "../../crates/arbor-index-snapshot" }
+arbor-types = { path = "../../crates/arbor-types" }
+arbor-bytecode = { path = "../../crates/arbor-bytecode" }
+arbor-proto-internal = { path = "../../crates/arbor-proto-internal" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.12", features = ["transport"] }
+thiserror = "2"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+config = { version = "0.15", features = ["toml"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+roaring = "0.11.2"
+rapidhash = "4.1.1"

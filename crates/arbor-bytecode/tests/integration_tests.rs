@@ -82,9 +82,9 @@ fn test_all_operand_types_integration() {
 
     let resource = empty_entity_at(2);
     let context = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    let mut vm = BytecodeVM::new(&context);
+    let mut vm = BytecodeVM::new();
 
-    assert_eq!(vm.evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(vm.evaluate(&compiled.instructions, &context), ConditionResult::True);
 }
 
 #[test]
@@ -128,17 +128,17 @@ fn test_complex_nested_logic_integration() {
     principal.attributes.set(locked_attr, AttributeValue::Bool(false));
     principal.attributes.set(role_attr,   AttributeValue::String("user".to_string()));
     let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&ctx).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // locked=true, role=user, !public → still True (left And branch fails but right returns user)
     principal.attributes.set(locked_attr, AttributeValue::Bool(true));
     let ctx2 = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&ctx2).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::True);
 
     // locked=true, role=admin, !public → False
     principal.attributes.set(role_attr, AttributeValue::String("admin".to_string()));
     let ctx3 = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&ctx3).evaluate(&compiled.instructions), ConditionResult::False);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx3), ConditionResult::False);
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn test_all_operators_integration() {
 
     let resource = empty_entity_at(2);
     let context = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&context).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &context), ConditionResult::True);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn test_type_and_hierarchy_integration() {
         .insert(principal.clone())
         .insert(group_entity.clone());
     let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
-    assert_eq!(BytecodeVM::new(&ctx).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // 2. Wrong entity type → False (IsType fails)
     let mut principal_wrong_type = empty_entity_at(principal_idx);
@@ -251,7 +251,7 @@ fn test_type_and_hierarchy_integration() {
         .insert(principal_wrong_type.clone())
         .insert(group_entity.clone());
     let ctx2 = EvaluationContext::new(&principal_wrong_type, &resource, None, &resolver2);
-    assert_eq!(BytecodeVM::new(&ctx2).evaluate(&compiled.instructions), ConditionResult::False);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::False);
 
     // 3. Right type but not in hierarchy → False (InHierarchy fails)
     let mut principal_not_in_group = empty_entity_at(principal_idx);
@@ -262,7 +262,7 @@ fn test_type_and_hierarchy_integration() {
         .insert(principal_not_in_group.clone())
         .insert(group_entity.clone());
     let ctx3 = EvaluationContext::new(&principal_not_in_group, &resource, None, &resolver3);
-    assert_eq!(BytecodeVM::new(&ctx3).evaluate(&compiled.instructions), ConditionResult::False);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx3), ConditionResult::False);
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn test_simple_eq_integration() {
     let principal = empty_entity_at(1);
     let resource  = empty_entity_at(2);
     let context   = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&context).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &context), ConditionResult::True);
 }
 
 #[test]
@@ -290,12 +290,12 @@ fn test_variable_lookup_integration() {
     let mut principal = empty_entity_at(1);
     principal.attributes.set(attr_id, AttributeValue::String("Alice".to_string()));
     let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&ctx).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     let mut principal_wrong = empty_entity_at(1);
     principal_wrong.attributes.set(attr_id, AttributeValue::String("Bob".to_string()));
     let ctx_wrong = EvaluationContext::new(&principal_wrong, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&ctx_wrong).evaluate(&compiled.instructions), ConditionResult::False);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx_wrong), ConditionResult::False);
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn test_short_circuit_and_integration() {
     let principal = empty_entity_at(1);
     let resource  = empty_entity_at(2);
     let context   = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
-    assert_eq!(BytecodeVM::new(&context).evaluate(&compiled.instructions), ConditionResult::False);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &context), ConditionResult::False);
 }
 
 /// Tests InHierarchy with an attribute-path variable (EntityRef stored in an attribute).
@@ -340,7 +340,7 @@ fn test_in_hierarchy_attr_integration() {
     principal_direct.attributes.set(groups_attr, AttributeValue::EntityRef(admin_group_idx));
     let resolver = MapResolver::new().insert(admin_group.clone());
     let ctx = EvaluationContext::new(&principal_direct, &resource, None, &resolver);
-    assert_eq!(BytecodeVM::new(&ctx).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // 2. principal.groups_attr = sub_group, which has admin_group as ancestor → True (transitive)
     let mut principal_nested = empty_entity_at(1);
@@ -349,5 +349,5 @@ fn test_in_hierarchy_attr_integration() {
         .insert(admin_group.clone())
         .insert(sub_group.clone());
     let ctx2 = EvaluationContext::new(&principal_nested, &resource, None, &resolver2);
-    assert_eq!(BytecodeVM::new(&ctx2).evaluate(&compiled.instructions), ConditionResult::True);
+    assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::True);
 }

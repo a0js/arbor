@@ -2,13 +2,14 @@ use std::net::IpAddr;
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
 use crate::attributes::AttributeValue;
 use crate::ids::{AttributeNameId, EntityTypeId};
 
 /// Policy Condition Operand types
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operand {
     // Literal values
     String(String),
@@ -24,7 +25,7 @@ pub enum Operand {
     Variable(VariableRef),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     Operand(Operand),
 
@@ -111,13 +112,13 @@ impl Condition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub struct VariableRef {
     pub scope: VariableScope,
     pub path: Vec<AttributeNameId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub enum VariableScope {
     Principal,
     Resource,

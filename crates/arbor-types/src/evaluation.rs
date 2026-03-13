@@ -1,5 +1,6 @@
 //! Types for condition evaluation
 
+use serde::{Deserialize, Serialize};
 use crate::entities::IndexedEntity;
 use crate::attributes::Attributes;
 
@@ -14,7 +15,7 @@ pub trait EntityResolver {
 }
 
 /// Result of evaluating a condition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConditionResult {
     /// Condition evaluated to true
     True,
@@ -25,7 +26,7 @@ pub enum ConditionResult {
 }
 
 /// Errors that can occur during condition evaluation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EvaluationError {
     /// An entity reference is not found
     MissingEntity { entity_index: u32 },

@@ -4,6 +4,17 @@ use crate::policies::IndexedPolicy;
 use std::hash::Hash;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+
+/// Simplified entity descriptor for ingestion; uses a human-readable type name
+/// instead of a pre-resolved `EntityTypeId`.
+#[derive(Debug, Clone)]
+pub struct EntityInput {
+    pub id: Uuid,
+    pub name: String,
+    pub type_name: String,
+    pub parents: Vec<Uuid>,
+}
 
 /// Represents an entity that can act as a principal, resource, or both
 #[derive(Debug, Clone)]
@@ -64,7 +75,7 @@ impl Entity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexedEntity {
     pub idx: u32,
     pub attributes: Attributes,
@@ -75,13 +86,14 @@ pub struct IndexedEntity {
     pub resource_of_policies: Option<RoaringBitmap>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IndexedEntityType {
     pub nodes_of_type: RoaringBitmap,
     pub policies_targeting_principals_of_type: RoaringBitmap,
     pub policies_targeting_resources_of_type: RoaringBitmap,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum IndexedNode {
     Entity(IndexedEntity),
     Policy(IndexedPolicy),

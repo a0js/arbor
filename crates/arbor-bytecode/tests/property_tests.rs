@@ -138,7 +138,7 @@ proptest! {
         let context = EvaluationContext::new(&principal, &resource, Some(&context_attrs), &NoopResolver);
 
         let ast_result = evaluate_ast(&condition, &context);
-        let bc_result  = BytecodeVM::new(&context).evaluate(&compiled.instructions);
+        let bc_result  = BytecodeVM::new().evaluate(&compiled.instructions, &context);
 
         match (&ast_result, &bc_result) {
             (ConditionResult::True,    ConditionResult::True)    => {}

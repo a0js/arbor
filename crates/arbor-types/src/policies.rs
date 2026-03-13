@@ -1,11 +1,12 @@
 use roaring::RoaringBitmap;
+use serde::{Deserialize, Serialize};
 use crate::conditions::{Condition, VariableRef};
 use crate::ids::EntityTypeId;
 use uuid::Uuid;
 use crate::CompiledCondition;
 
 /// Policy types in the system
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyType {
     Permit,
     Forbid,
@@ -34,7 +35,7 @@ impl PolicyTarget {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum IndexedPolicyTarget {
     Entity(u32),
     EntityWithDescendants(u32),
@@ -90,7 +91,7 @@ impl Policy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedPolicy {
     pub idx: u32,
     pub principal_target: IndexedPolicyTarget,

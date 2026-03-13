@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, GraphError, Policy, PolicyTarget};
+use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, EntityInput, EntityTypeId, GraphError, Policy, PolicyTarget};
 use roaring::RoaringBitmap;
 use crate::types::NodeType;
 
@@ -376,5 +376,28 @@ impl super::graph::Graph {
 
     fn verify_action_set_existence(&self, action_set_id: Uuid) -> ArborResult<(u32, &ActionSet)> {
         self.verify_node(action_set_id, "ActionSet", NodeType::as_action_set)
+    }
+
+    pub fn register_entity_type(&mut self, id: EntityTypeId, name: String) {
+        self.entity_type_names.insert(id, name);
+    }
+
+    /// Look up an `EntityTypeId` by name, creating and registering one if not found.
+    pub fn get_or_create_entity_type_id(&mut self, name: &str) -> EntityTypeId {
+        if let Some((&id, _)) = self.entity_type_names.iter().find(|(_, v)| v.as_str() == name) {
+            return id;
+        }
+        // Use the next available u32 (1-indexed, 0 is reserved for "unknown")
+        let next_id = self.entity_type_names.len() as u32 + 1;
+        let id = EntityTypeId::new(next_id);
+        self.entity_type_names.insert(id, name.to_string());
+        id
+    }
+
+    /// Upsert an entity described by an `EntityInput`, resolving the type name automatically.
+    pub fn upsert_entity_from_input(&mut self, input: EntityInput) -> ArborResult<()> {
+        let type_id = self.get_or_create_entity_type_id(&input.type_name);
+        let entity = Entity::new(input.id, input.name, type_id, input.parents);
+        self.upsert_entity(entity)
     }
 }

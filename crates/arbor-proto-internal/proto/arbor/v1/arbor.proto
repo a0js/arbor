@@ -1,0 +1,67 @@
+syntax = "proto3";
+package arbor.v1;
+
+service Arbor {
+  rpc Check(CheckRequest) returns (CheckResponse);
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc ListPrincipals(ListPrincipalsRequest) returns (ListPrincipalsResponse);
+  rpc ListActions(ListActionsRequest) returns (ListActionsResponse);
+}
+
+message CheckRequest {
+  string principal_id = 1;
+  string action_id    = 2;
+  string resource_id  = 3;
+  bool   explain      = 4;
+}
+
+message CheckResponse {
+  enum Decision {
+    DENY   = 0;
+    PERMIT = 1;
+  }
+  Decision decision         = 1;
+  uint64   snapshot_version = 2;
+  repeated string reasons           = 3;
+}
+
+message ListResourcesRequest {
+  string principal_id    = 1;
+  string action_id       = 2;
+  string entity_type_id  = 3;
+  string page_token      = 4;
+  uint32 page_size       = 5;
+}
+
+message ListResourcesResponse {
+  repeated string resource_ids    = 1;
+  uint64          snapshot_version = 2;
+  string          next_page_token  = 3;
+}
+
+message ListPrincipalsRequest {
+  string resource_id    = 1;
+  string action_id      = 2;
+  string entity_type_id = 3;
+  string page_token     = 4;
+  uint32 page_size      = 5;
+}
+
+message ListPrincipalsResponse {
+  repeated string principal_ids   = 1;
+  uint64          snapshot_version = 2;
+  string          next_page_token  = 3;
+}
+
+message ListActionsRequest {
+  string principal_id = 1;
+  string resource_id  = 2;
+  string page_token   = 3;
+  uint32 page_size    = 4;
+}
+
+message ListActionsResponse {
+  repeated string action_ids      = 1;
+  uint64          snapshot_version = 2;
+  string          next_page_token  = 3;
+}

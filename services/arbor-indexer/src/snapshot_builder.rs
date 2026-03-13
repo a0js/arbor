@@ -96,6 +96,7 @@ fn compile_condition(policy: &Policy) -> Option<CompiledCondition> {
 struct BuildState {
     nodes: Vec<IndexedNode>,
     indexed_entity_types: RapidHashMap<EntityTypeId, IndexedEntityType>,
+    entity_type_name_to_id: RapidHashMap<String, EntityTypeId>,
     action_to_policies: RapidHashMap<u32, RoaringBitmap>,
     index_to_uuid: Vec<Option<Uuid>>,
 
@@ -117,6 +118,7 @@ impl BuildState {
         Self {
             nodes: (0..node_count).map(|_| IndexedNode::Other).collect(),
             indexed_entity_types: RapidHashMap::default(),
+            entity_type_name_to_id: RapidHashMap::default(),
             action_to_policies: RapidHashMap::default(),
             index_to_uuid: vec![None; node_count],
             all_principal_policies: RoaringBitmap::new(),
@@ -271,6 +273,7 @@ impl BuildState {
             nodes: self.nodes,
             action_to_policies: self.action_to_policies,
             indexed_entity_types: self.indexed_entity_types,
+            entity_type_name_to_id: self.entity_type_name_to_id,
             all_principal_policies: self.all_principal_policies,
             all_resource_policies: self.all_resource_policies,
             conditional_policies: self.conditional_policies,
@@ -298,7 +301,12 @@ impl SnapshotBuilder {
     /// Returns [`ArborError::EntityNotFound`] if a policy references a
     /// principal or resource UUID not present in the graph.
     pub fn build(graph: &Graph) -> ArborResult<Snapshot> {
-        let mut state = BuildState::new(graph.next_index as usize);
+        let mut state = BuildState::new(graph.nodes.len());
+
+        // Copy entity type names
+        for (id, name) in &graph.entity_type_names {
+            state.entity_type_name_to_id.insert(name.clone(), *id);
+        }
 
         for (idx, node) in graph.nodes.iter().enumerate() {
             let idx = idx as u32;
@@ -313,5 +321,25 @@ impl SnapshotBuilder {
 
         state.apply_deferred();
         Ok(state.into_snapshot(graph.uuid_to_index.clone()))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbor_graph_core::graph::Graph;
+    use arbor_types::EntityTypeId;
+
+    #[test]
+    fn test_entity_type_name_mapping() {
+        let mut graph = Graph::new();
+        let type_id = EntityTypeId::new(1);
+        graph.register_entity_type(type_id, "User".to_string());
+
+        let snapshot = SnapshotBuilder::build(&graph).expect("build failed");
+
+        assert_eq!(snapshot.get_entity_type_id_by_name("User"), Some(type_id));
+        assert_eq!(snapshot.get_entity_type_id_by_name("NonExistent"), None);
     }
 }
