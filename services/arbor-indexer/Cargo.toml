@@ -3,6 +3,10 @@ name = "arbor-indexer"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "arbor_indexer"
+path = "src/lib.rs"
+
 [dependencies]
 arbor-types = { path = "../../crates/arbor-types" }
 arbor-graph-core = { path = "../../crates/arbor-graph-core" }

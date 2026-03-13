@@ -1,0 +1,24 @@
+[package]
+name = "arbor-bench"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "arbor_bench"
+path = "src/lib.rs"
+
+[dependencies]
+arbor-graph-core = { path = "../crates/arbor-graph-core" }
+arbor-indexer = { path = "../services/arbor-indexer" }
+arbor-authorizer = { path = "../services/arbor-authorizer" }
+arbor-index-snapshot = { path = "../crates/arbor-index-snapshot" }
+arbor-types = { path = "../crates/arbor-types" }
+uuid = { version = "1.18.1", features = ["v4", "v5"] }
+roaring = "0.11.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "authorization"
+harness = false

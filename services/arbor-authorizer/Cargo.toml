@@ -3,6 +3,10 @@ name = "arbor-authorizer"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "arbor_authorizer"
+path = "src/lib.rs"
+
 [dependencies]
 arbor-index-snapshot = { path = "../../crates/arbor-index-snapshot" }
 arbor-types = { path = "../../crates/arbor-types" }

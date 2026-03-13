@@ -68,6 +68,13 @@ pub struct AuthorizerEngine {
 }
 
 impl AuthorizerEngine {
+    /// Construct an engine directly from a [`Snapshot`], bypassing file I/O.
+    ///
+    /// Intended for benchmarks and tests that build a snapshot in memory.
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        Self { snapshot: Arc::new(snapshot), version: 0 }
+    }
+
     pub fn load(path: &Path) -> Result<Self, StartupError> {
         let bytes = fs::read(path)?;
         let packaged = PackagedSnapshot::deserialize(&bytes)?;
