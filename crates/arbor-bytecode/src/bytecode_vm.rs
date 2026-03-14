@@ -237,16 +237,32 @@ impl BytecodeVM {
     // ===== Stack Operations =====
 
     fn execute_push_variable(&mut self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Result<(), String> {
-        let value = match self.resolve_variable(var_ref, ctx) {
-            Some(AttributeValue::String(s)) => StackValue::String(s),
-            Some(AttributeValue::Float(f)) => StackValue::Float(f),
-            Some(AttributeValue::Integer(i)) => StackValue::Integer(i),
-            Some(AttributeValue::Bool(b)) => StackValue::Bool(b),
-            Some(AttributeValue::IpAddr(ip)) => StackValue::IpAddr(ip),
-            Some(AttributeValue::IpNetwork(net)) => StackValue::IpNetwork(net),
-            Some(AttributeValue::Timestamp(t)) => StackValue::Timestamp(t),
-            Some(AttributeValue::EntityRef(u)) => StackValue::EntityRef(u),
-            Some(AttributeValue::Set(s)) => StackValue::Set(s),
+        // When the path is empty the variable refers to the entity itself (synthesised EntityRef).
+        // We materialise that value inline so that `resolve_variable` can return a plain reference
+        // for every other case and avoid a clone on the hot path.
+        let synthesised;
+        let resolved: Option<&AttributeValue> = if var_ref.path.is_empty() {
+            let idx = match var_ref.scope {
+                VariableScope::Principal => Some(ctx.principal.idx),
+                VariableScope::Resource => Some(ctx.resource.idx),
+                VariableScope::Context => None,
+            };
+            synthesised = idx.map(AttributeValue::EntityRef);
+            synthesised.as_ref()
+        } else {
+            self.resolve_variable(var_ref, ctx)
+        };
+
+        let value = match resolved {
+            Some(AttributeValue::String(s)) => StackValue::String(s.clone()),
+            Some(AttributeValue::Float(f)) => StackValue::Float(*f),
+            Some(AttributeValue::Integer(i)) => StackValue::Integer(*i),
+            Some(AttributeValue::Bool(b)) => StackValue::Bool(*b),
+            Some(AttributeValue::IpAddr(ip)) => StackValue::IpAddr(*ip),
+            Some(AttributeValue::IpNetwork(net)) => StackValue::IpNetwork(*net),
+            Some(AttributeValue::Timestamp(t)) => StackValue::Timestamp(*t),
+            Some(AttributeValue::EntityRef(u)) => StackValue::EntityRef(*u),
+            Some(AttributeValue::Set(s)) => StackValue::Set(s.clone()),
             // Objects cannot be directly compared; treat as Missing.
             Some(AttributeValue::Object(_)) | None => StackValue::Missing,
         };
@@ -254,28 +270,34 @@ impl BytecodeVM {
         Ok(())
     }
 
-    /// Resolve an attribute path to its value. Returns `None` if the path does
-    /// not exist or if context attributes are absent for a Context-scoped variable.
-    fn resolve_variable(&self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Option<AttributeValue> {
+    /// Resolve an attribute path to its value. Returns a reference to avoid
+    /// cloning on the hot path. Returns `None` if the path does not exist or if
+    /// context attributes are absent for a Context-scoped variable.
+    ///
+    /// Callers that need to handle the empty-path (entity-self) case must do so
+    /// before calling this function; `resolve_variable` returns `None` for an
+    /// empty path.
+    fn resolve_variable<'ctx>(&self, var_ref: &VariableRef, ctx: &'ctx EvaluationContext<'_>) -> Option<&'ctx AttributeValue> {
+        if var_ref.path.is_empty() {
+            return None;
+        }
         let base = match var_ref.scope {
             VariableScope::Principal => &ctx.principal.attributes,
             VariableScope::Resource => &ctx.resource.attributes,
             VariableScope::Context => ctx.context_attrs?,
         };
-        if var_ref.path.is_empty() {
-            return match var_ref.scope {
-                VariableScope::Principal => Some(AttributeValue::EntityRef(ctx.principal.idx)),
-                VariableScope::Resource => Some(AttributeValue::EntityRef(ctx.resource.idx)),
-                VariableScope::Context => None,
-            }
-        }
-        base.get_nested(&var_ref.path).cloned()
+        base.get_nested(&var_ref.path)
     }
 
     // ===== Attribute Operations =====
 
     fn execute_has_attribute(&mut self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Result<(), String> {
-        let exists = self.resolve_variable(var_ref, ctx).is_some();
+        let exists = if var_ref.path.is_empty() {
+            // Empty path refers to the entity itself; Principal/Resource always exist.
+            matches!(var_ref.scope, VariableScope::Principal | VariableScope::Resource)
+        } else {
+            self.resolve_variable(var_ref, ctx).is_some()
+        };
         self.stack.push(StackValue::Bool(exists));
         Ok(())
     }
@@ -578,26 +600,38 @@ impl BytecodeVM {
 
     // ===== Entity Type Check =====
 
-    fn execute_in_hierarchy(&mut self, descendant: &ResolvedEntityIndex, ancestor: &ResolvedEntityIndex, ctx: &EvaluationContext<'_>) -> Result<(), String> {
-        let desc_idx = match descendant {
-            ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
+    /// Resolve a `ResolvedEntityIndex` to a concrete `u32` snapshot index.
+    ///
+    /// For `Variable` operands with an empty path the entity index is taken
+    /// directly from the evaluation context (principal / resource). For
+    /// non-empty paths the attribute value must be an `EntityRef`.
+    fn resolve_entity_index(
+        &self,
+        operand: &ResolvedEntityIndex,
+        ctx: &EvaluationContext<'_>,
+    ) -> Result<u32, String> {
+        match operand {
+            ResolvedEntityIndex::Direct(idx) => Ok(*idx),
             ResolvedEntityIndex::Variable(var_ref) => {
-                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
-                    return Err("Variable must resolve to EntityRef".into());
-                };
-                Ok(ent)
-            },
-        }?;
+                if var_ref.path.is_empty() {
+                    match var_ref.scope {
+                        VariableScope::Principal => Ok(ctx.principal.idx),
+                        VariableScope::Resource => Ok(ctx.resource.idx),
+                        VariableScope::Context => Err("Context scope cannot be used as entity ref in InHierarchy".into()),
+                    }
+                } else {
+                    let Some(&AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
+                        return Err("Variable must resolve to EntityRef".into());
+                    };
+                    Ok(ent)
+                }
+            }
+        }
+    }
 
-        let anc_idx = match ancestor {
-            ResolvedEntityIndex::Direct(ent) => Ok::<u32, String>(*ent),
-            ResolvedEntityIndex::Variable(var_ref) => {
-                let Some(AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
-                    return Err("Variable must resolve to EntityRef".into());
-                };
-                Ok(ent)
-            },
-        }?;
+    fn execute_in_hierarchy(&mut self, descendant: &ResolvedEntityIndex, ancestor: &ResolvedEntityIndex, ctx: &EvaluationContext<'_>) -> Result<(), String> {
+        let desc_idx = self.resolve_entity_index(descendant, ctx)?;
+        let anc_idx = self.resolve_entity_index(ancestor, ctx)?;
 
         let Some(desc) = ctx.entities.get_entity(desc_idx) else {
             return Err("Entity not found".into());

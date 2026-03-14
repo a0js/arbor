@@ -8,7 +8,10 @@
 use arbor_graph_core::graph::Graph;
 use arbor_index_snapshot::Snapshot;
 use arbor_indexer::snapshot_builder::SnapshotBuilder;
-use arbor_types::{Action, Entity, EntityTypeId, Policy, PolicyTarget, PolicyType};
+use arbor_types::{
+    Action, AttributeNameId, AttributeValue, Condition, Entity, EntityTypeId, Operand, Policy,
+    PolicyTarget, PolicyType, VariableRef, VariableScope,
+};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -92,6 +95,11 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
     let file_type = graph.get_or_create_entity_type_id("File");
     let folder_type = graph.get_or_create_entity_type_id("Folder");
 
+    // Attribute name IDs — stable u32 constants, no registry needed.
+    let attr_department  = AttributeNameId::new(1); // e.g. "dept-0", "dept-1", ...
+    let attr_clearance   = AttributeNameId::new(2); // 0..4
+    let attr_sensitivity = AttributeNameId::new(3); // 0..4 (on files)
+
     // ------------------------------------------------------------------
     // Actions
     // ------------------------------------------------------------------
@@ -145,14 +153,12 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
     } else {
         org_id
     };
-    graph.upsert_entity(Entity::new(
-        permitted_user_id,
-        "user-0".into(),
-        user_type,
-        vec![permitted_user_parent],
-    )).expect("upsert permitted user");
+    let mut permitted_user = Entity::new(permitted_user_id, "user-0".into(), user_type, vec![permitted_user_parent]);
+    permitted_user.add_attribute(attr_department, AttributeValue::String("dept-0".into()));
+    permitted_user.add_attribute(attr_clearance, AttributeValue::Integer(3));
+    graph.upsert_entity(permitted_user).expect("upsert permitted user");
 
-    // Rest of users distributed across teams (or dept fallback).
+    // Rest of users distributed across teams (or dept fallback), with attributes.
     for i in 1..n_users {
         let parent = if !team_ids.is_empty() {
             team_ids[i % team_ids.len()]
@@ -162,14 +168,18 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
             org_id
         };
         let id = entity_uuid("user", i);
-        graph.upsert_entity(Entity::new(id, format!("user-{i}"), user_type, vec![parent]))
-            .expect("upsert user");
+        let mut user = Entity::new(id, format!("user-{i}"), user_type, vec![parent]);
+        user.add_attribute(attr_department, AttributeValue::String(format!("dept-{}", i % n_depts.max(1))));
+        user.add_attribute(attr_clearance, AttributeValue::Integer((i % 5) as i64));
+        graph.upsert_entity(user).expect("upsert user");
     }
 
-    // Denied user — sits outside the org (no parent).
+    // Denied user — sits outside the org (no parent), clearance 0.
     let denied_user_id = entity_uuid("denied-user", 0);
-    graph.upsert_entity(Entity::new(denied_user_id, "denied-user-0".into(), user_type, vec![]))
-        .expect("upsert denied user");
+    let mut denied_user = Entity::new(denied_user_id, "denied-user-0".into(), user_type, vec![]);
+    denied_user.add_attribute(attr_department, AttributeValue::String("external".into()));
+    denied_user.add_attribute(attr_clearance, AttributeValue::Integer(0));
+    graph.upsert_entity(denied_user).expect("upsert denied user");
 
     // ------------------------------------------------------------------
     // Resource hierarchy: recursive folder tree, files as leaves.
@@ -222,12 +232,9 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
     // (deepest reachable via the tree expansion).
     let deepest_folder_id = *expand_queue.last().unwrap_or(&root_folder_id);
     let specific_file_id = entity_uuid("file", 0);
-    graph.upsert_entity(Entity::new(
-        specific_file_id,
-        "file-0".into(),
-        file_type,
-        vec![deepest_folder_id],
-    )).expect("upsert specific file");
+    let mut specific_file = Entity::new(specific_file_id, "file-0".into(), file_type, vec![deepest_folder_id]);
+    specific_file.add_attribute(attr_sensitivity, AttributeValue::Integer(3));
+    graph.upsert_entity(specific_file).expect("upsert specific file");
 
     for i in 1..n_files {
         let parent_folder = if leaf_count > 0 {
@@ -236,8 +243,9 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
             root_folder_id
         };
         let id = entity_uuid("file", i);
-        graph.upsert_entity(Entity::new(id, format!("file-{i}"), file_type, vec![parent_folder]))
-            .expect("upsert file");
+        let mut file = Entity::new(id, format!("file-{i}"), file_type, vec![parent_folder]);
+        file.add_attribute(attr_sensitivity, AttributeValue::Integer((i % 5) as i64));
+        graph.upsert_entity(file).expect("upsert file");
     }
 
     // ------------------------------------------------------------------
@@ -387,6 +395,71 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
             None,
         )).expect("upsert forbid");
     }
+
+    // ------------------------------------------------------------------
+    // Conditional policies — exercise the bytecode VM at eval time.
+    //
+    // These sit on top of the scaled set and cover three realistic patterns:
+    //
+    //   C1. Permit all users WHERE principal.clearance >= resource.sensitivity
+    //       — attribute comparison across both sides; most realistic ABAC pattern.
+    //
+    //   C2. Permit EntityType(User) → EntityType(File) read
+    //       WHERE principal.department == "dept-0"
+    //       — single-side string equality; faster path, but still hits the VM.
+    //
+    //   C3. Forbid EntityType(User) → EntityType(File) read
+    //       WHERE resource.sensitivity == 4
+    //       — conditional forbid; ensures the VM is exercised on the deny path too.
+    // ------------------------------------------------------------------
+
+    // C1: clearance >= sensitivity
+    graph.upsert_policy(Policy::new(
+        policy_uuid("conditional-clearance", 0),
+        "conditional-clearance".into(),
+        None,
+        PolicyType::Permit,
+        PolicyTarget::EntityType(user_type),
+        PolicyTarget::EntityType(file_type),
+        vec![read_id],
+        vec![],
+        Some(Condition::Gte(
+            Operand::Variable(VariableRef { scope: VariableScope::Principal, path: vec![attr_clearance] }),
+            Operand::Variable(VariableRef { scope: VariableScope::Resource,  path: vec![attr_sensitivity] }),
+        )),
+    )).expect("upsert conditional C1");
+
+    // C2: department == "dept-0"
+    graph.upsert_policy(Policy::new(
+        policy_uuid("conditional-dept", 0),
+        "conditional-dept".into(),
+        None,
+        PolicyType::Permit,
+        PolicyTarget::EntityType(user_type),
+        PolicyTarget::EntityType(file_type),
+        vec![read_id],
+        vec![],
+        Some(Condition::Eq(
+            Operand::Variable(VariableRef { scope: VariableScope::Principal, path: vec![attr_department] }),
+            Operand::String("dept-0".into()),
+        )),
+    )).expect("upsert conditional C2");
+
+    // C3: conditional forbid when sensitivity == 4
+    graph.upsert_policy(Policy::new(
+        policy_uuid("conditional-sensitivity-forbid", 0),
+        "conditional-sensitivity-forbid".into(),
+        None,
+        PolicyType::Forbid,
+        PolicyTarget::EntityType(user_type),
+        PolicyTarget::EntityType(file_type),
+        vec![read_id],
+        vec![],
+        Some(Condition::Eq(
+            Operand::Variable(VariableRef { scope: VariableScope::Resource, path: vec![attr_sensitivity] }),
+            Operand::Integer(4),
+        )),
+    )).expect("upsert conditional C3");
 
     // ------------------------------------------------------------------
     // Build snapshot
