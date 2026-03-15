@@ -3,6 +3,7 @@ package arbor.v1;
 
 service Arbor {
   rpc Check(CheckRequest) returns (CheckResponse);
+  rpc CheckBatch(CheckBatchRequest) returns (CheckBatchResponse);
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
   rpc ListPrincipals(ListPrincipalsRequest) returns (ListPrincipalsResponse);
   rpc ListActions(ListActionsRequest) returns (ListActionsResponse);
@@ -23,6 +24,25 @@ message CheckResponse {
   Decision decision         = 1;
   uint64   snapshot_version = 2;
   repeated string reasons           = 3;
+}
+
+message CheckItem {
+  string principal_id = 1;
+  string action_id    = 2;
+  string resource_id  = 3;
+}
+
+message CheckBatchRequest {
+  repeated CheckItem items = 1;
+}
+
+message CheckResultItem {
+  CheckResponse.Decision decision = 1;
+}
+
+message CheckBatchResponse {
+  repeated CheckResultItem results          = 1;
+  uint64                   snapshot_version = 2;
 }
 
 message ListResourcesRequest {

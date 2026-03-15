@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arbor_proto_internal::arbor_v1::{
     self,
     arbor_server::Arbor,
+    CheckBatchRequest, CheckBatchResponse, CheckResultItem,
     CheckRequest, CheckResponse,
     ListActionsRequest, ListActionsResponse,
     ListPrincipalsRequest, ListPrincipalsResponse,
@@ -92,6 +93,47 @@ impl Arbor for AuthorizerService {
             decision: proto_decision.into(),
             snapshot_version: self.engine.version,
             reasons: self.indices_to_uuid_strings(&result.reason_policy_indices),
+        }))
+    }
+
+    async fn check_batch(
+        &self,
+        request: Request<CheckBatchRequest>,
+    ) -> Result<Response<CheckBatchResponse>, Status> {
+        let req = request.into_inner();
+        let mut results = Vec::with_capacity(req.items.len());
+
+        for item in &req.items {
+            let (principal_idx, action_idx, resource_idx) = match (
+                self.resolve_uuid(&item.principal_id, "principal_id"),
+                self.resolve_uuid(&item.action_id, "action_id"),
+                self.resolve_uuid(&item.resource_id, "resource_id"),
+            ) {
+                (Ok(p), Ok(a), Ok(r)) => (p, a, r),
+                _ => {
+                    results.push(CheckResultItem {
+                        decision: ProtoDecision::Deny.into(),
+                    });
+                    continue;
+                }
+            };
+
+            let result = self.engine.check(principal_idx, action_idx, resource_idx)
+                .map_err(engine_error_to_status)?;
+
+            let proto_decision = match result.decision {
+                Decision::Permit => ProtoDecision::Permit,
+                Decision::Deny   => ProtoDecision::Deny,
+            };
+
+            results.push(CheckResultItem {
+                decision: proto_decision.into(),
+            });
+        }
+
+        Ok(Response::new(CheckBatchResponse {
+            results,
+            snapshot_version: self.engine.version,
         }))
     }
 

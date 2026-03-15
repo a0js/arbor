@@ -142,8 +142,67 @@ fn bench_list_principals(
 }
 
 // ---------------------------------------------------------------------------
+// check_batch() benchmark
+//
+// Measures the cost of processing N sequential engine.check() calls — the
+// core loop inside the CheckBatch gRPC handler. Run at a single representative
+// scale (1M entities) and vary only batch size: 20, 100, 500.
+// ---------------------------------------------------------------------------
+
+const BATCH_SCALE: usize = 1_000_000;
+const BATCH_SIZES: &[usize] = &[20, 100, 500];
+
+fn bench_check_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("check_batch");
+
+    let (snapshot, fixtures) = build_scenario(BATCH_SCALE);
+    let engine = AuthorizerEngine::from_snapshot(snapshot);
+
+    for &batch_size in BATCH_SIZES {
+        group.bench_with_input(
+            BenchmarkId::new("permitted", batch_size),
+            &batch_size,
+            |b, &n| {
+                b.iter(|| {
+                    for _ in 0..n {
+                        engine
+                            .check(
+                                fixtures.permitted_principal,
+                                fixtures.action,
+                                fixtures.resource,
+                            )
+                            .expect("check failed");
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("mixed", batch_size),
+            &batch_size,
+            |b, &n| {
+                b.iter(|| {
+                    for i in 0..n {
+                        let principal = if i % 2 == 0 {
+                            fixtures.permitted_principal
+                        } else {
+                            fixtures.denied_principal
+                        };
+                        engine
+                            .check(principal, fixtures.action, fixtures.resource)
+                            .expect("check failed");
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Criterion entry points
 // ---------------------------------------------------------------------------
 
-criterion_group!(benches, bench_check, bench_list_entities);
+criterion_group!(benches, bench_check, bench_check_batch, bench_list_entities);
 criterion_main!(benches);
