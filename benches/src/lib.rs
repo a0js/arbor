@@ -14,6 +14,100 @@ use arbor_types::{
 };
 use uuid::Uuid;
 
+/// Writes a list of sorted u32 sets to the flat scratch format read by
+/// [`read_ancestor_arena`]: u64 set_count, then per set a u32 len followed
+/// by `len` u32s. Field-agnostic — used for `ancestors`, `effective_*`, etc.
+pub fn write_bitmap_sets(path: &str, sets: &[Vec<u32>]) {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).expect("create output file");
+    let mut w = std::io::BufWriter::new(file);
+
+    w.write_all(&(sets.len() as u64).to_le_bytes()).unwrap();
+    for set in sets {
+        w.write_all(&(set.len() as u32).to_le_bytes()).unwrap();
+        for &v in set {
+            w.write_all(&v.to_le_bytes()).unwrap();
+        }
+    }
+    w.flush().unwrap();
+}
+
+/// Reads the flat ancestor-set scratch format written by the `dump_ancestors`
+/// binary directly into a single flat arena — `(offset, length)` per entity
+/// indexing into one shared `Vec<u32>` — rather than one `Vec<u32>` per
+/// entity. This keeps the *loading* baseline free of N-small-allocations
+/// overhead, so `ancestor_repr_roaring` and `ancestor_repr_arena` can be
+/// compared against an identical, minimal-overhead starting point: the only
+/// difference between the two binaries is what they build *from* this arena.
+pub fn read_ancestor_arena(path: &str) -> (Vec<u32>, Vec<(u32, u32)>) {
+    use std::io::Read;
+
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .expect("open ancestor scratch file")
+        .read_to_end(&mut buf)
+        .expect("read ancestor scratch file");
+
+    let mut pos = 0usize;
+    let read_u64 = |buf: &[u8], pos: &mut usize| -> u64 {
+        let v = u64::from_le_bytes(buf[*pos..*pos + 8].try_into().unwrap());
+        *pos += 8;
+        v
+    };
+    let read_u32 = |buf: &[u8], pos: &mut usize| -> u32 {
+        let v = u32::from_le_bytes(buf[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        v
+    };
+
+    let entity_count = read_u64(&buf, &mut pos) as usize;
+
+    // First pass: read lengths only, to size the arena exactly up front.
+    let mut lengths = Vec::with_capacity(entity_count);
+    let mut header_pos = pos;
+    for _ in 0..entity_count {
+        let len = read_u32(&buf, &mut header_pos) as usize;
+        lengths.push(len);
+        header_pos += len * 4;
+    }
+    let total_elements: usize = lengths.iter().sum();
+
+    let mut arena = Vec::with_capacity(total_elements);
+    let mut offsets = Vec::with_capacity(entity_count);
+    for &len in &lengths {
+        let _len_field = read_u32(&buf, &mut pos) as usize;
+        let start = arena.len() as u32;
+        for _ in 0..len {
+            arena.push(read_u32(&buf, &mut pos));
+        }
+        offsets.push((start, len as u32));
+    }
+
+    (arena, offsets)
+}
+
+/// Prints a peak-RSS checkpoint to stderr when `ARBOR_MEM_DEBUG` is set.
+/// `ru_maxrss` is a high-water mark, so successive checkpoints reveal which
+/// build phase is responsible for a given jump in peak memory.
+fn debug_rss_checkpoint(label: &str) {
+    if std::env::var_os("ARBOR_MEM_DEBUG").is_none() {
+        return;
+    }
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+        #[cfg(target_os = "macos")]
+        let bytes = usage.ru_maxrss as u64;
+        #[cfg(not(target_os = "macos"))]
+        let bytes = (usage.ru_maxrss as u64) * 1024;
+        eprintln!(
+            "[mem] {label}: peak_rss_mb={:.1}",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fixed UUID namespaces — all derived deterministically from a single root.
 // ---------------------------------------------------------------------------
@@ -461,11 +555,19 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
         )),
     )).expect("upsert conditional C3");
 
+    debug_rss_checkpoint("graph fully populated (entities + policies)");
+
     // ------------------------------------------------------------------
     // Build snapshot
     // ------------------------------------------------------------------
 
     let snapshot = SnapshotBuilder::build(&graph).expect("build snapshot");
+
+    debug_rss_checkpoint("snapshot built (graph still alive)");
+
+    drop(graph);
+
+    debug_rss_checkpoint("graph dropped");
 
     // Resolve indices for the returned fixtures.
     let uuid_to_index = &snapshot.uuid_to_index;
