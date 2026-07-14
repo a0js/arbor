@@ -51,7 +51,7 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 - [x] Entity type index population
 - [x] 17 snapshot tests passing
 
-### 🚧 Estimated Completion: ~45%
+### 🚧 Estimated Completion: ~75%
 
 ---
 
@@ -68,12 +68,12 @@ This document outlines what needs to be built in Arbor to achieve a production-r
 
 ---
 
-### Phase 1: Core Authorization Engine ← YOU ARE HERE
+### Phase 1: Core Authorization Engine ✅ Complete
 
 #### Step 1: Snapshot Serialization (arbor-index-snapshot)
 
 **Priority**: 🔴 Critical
-**Status**: Not started
+**Status**: ✅ Complete
 
 The Snapshot struct currently lives only in memory. We need to serialize it so the indexer can produce a file/blob and the authorizer can load it.
 
@@ -122,7 +122,7 @@ The Snapshot struct currently lives only in memory. We need to serialize it so t
 #### Step 2: Authorization Operations
 
 **Priority**: 🔴 Critical
-**Status**: Not started
+**Status**: ✅ Complete
 
 The Snapshot already has the query helpers (`get_policies_for_*`, `split_policy_map_for_authorization`). Now implement the actual authorization logic.
 
@@ -169,7 +169,7 @@ The Snapshot already has the query helpers (`get_policies_for_*`, `split_policy_
 #### Step 3: End-to-End Integration Tests
 
 **Priority**: 🔴 Critical
-**Status**: Not started
+**Status**: 🚧 Not started ← YOU ARE HERE
 
 Test the full pipeline: Graph → SnapshotBuilder → Snapshot → check()/list()
 
@@ -192,30 +192,73 @@ Test the full pipeline: Graph → SnapshotBuilder → Snapshot → check()/list(
 #### Step 4: Indexer Service
 
 **Priority**: 🔴 Critical
-**Status**: Stub exists
+**Status**: ✅ Complete
 
-**V1 approach**: Indexer writes a snapshot file to disk. That's it.
+Indexer loads a graph, builds a `PackagedSnapshot`, and writes it to `ARBOR_SNAPSHOT_PATH`. Currently uses `example_graph::build()` as its data source — replaced by connectors in Step 4b.
+
+#### Step 4b: Connectors (arbor-connectors)
+
+**Priority**: 🔴 Critical
+**Status**: 🚧 Not started
+
+Replace the hardcoded `example_graph::build()` with a real data ingestion layer driven by YAML config.
+
+**Design**: Two config files:
+- `config/connectors.yaml` — named connection definitions (credentials injected via `ARBOR__CONNECTORS__<NAME>__PASSWORD`)
+- `config/entity_types.yaml` — SQL queries per entity type + policy queries, each referencing a connector by name
+
+See [connectors.md](./connectors.md) for full configuration reference.
 
 **Tasks**:
-1. Service skeleton with tokio runtime
-2. Graph initialization from data source
-3. Snapshot generation via SnapshotBuilder
-4. Snapshot packaging (serialize + compress + checksum)
-5. Write `PackagedSnapshot` to a file path
-6. Health check endpoint
-7. Configuration (TOML)
+1. Add `ConnectorsConfig`, `EntityTypesConfig`, and config loading to `arbor-connectors`
+2. Define `Connector` trait: `fn load(&self) -> ArborResult<Graph>`
+3. Implement `ExampleConnector` (wraps `example_graph::build()`)
+4. Implement `PostgresConnector` using `sqlx` — runs entity + policy queries, assembles `Graph`
+5. Wire into `services/arbor-indexer/src/main.rs` (replace `example_graph::build()`)
 
-**Files to modify/create**:
-- `services/arbor-indexer/src/main.rs`
-- `services/arbor-indexer/src/service.rs`
-- `services/arbor-indexer/src/config.rs`
+**Files to create/modify**:
+- `crates/arbor-connectors/src/lib.rs` — config types + `Connector` trait
+- `crates/arbor-connectors/src/postgres.rs` — `PostgresConnector`
+- `crates/arbor-connectors/src/example.rs` — `ExampleConnector`
+- `crates/arbor-connectors/Cargo.toml` — add `sqlx`, `serde`, `config`, `tokio`
+- `services/arbor-indexer/src/main.rs` — load connector from config
 
-**Estimated Lines**: ~600
+**Crates to add**: `sqlx = { version = "0.8", features = ["postgres", "uuid", "runtime-tokio"] }`
+
+**Estimated Lines**: ~400
+
+#### Step 4c: CSV Connector
+
+**Priority**: 🟡 High
+**Status**: 🚧 Not started
+
+Simple file-based connector for bootstrapping and testing without a live database.
+
+**Tasks**:
+1. Implement `CsvConnector` — reads `entities.csv` and `policies.csv`
+2. Add `csv` connector type to `ConnectorConfig`
+
+**CSV column contracts** mirror the SQL query contracts:
+- `entities.csv`: `id, name, type_name, parent_ids` (semicolon-separated UUIDs for `parent_ids`)
+- `policies.csv`: `id, name, policy_type, principal_id, resource_id, actions` (semicolon-separated UUIDs for `actions`)
+
+**Config**:
+```yaml
+connectors:
+  flat_files:
+    type: csv
+    entities_file: /data/entities.csv
+    policies_file: /data/policies.csv
+```
+
+**Crates to add**: `csv = "1"`
+
+**Estimated Lines**: ~150
 
 #### Step 5: Authorizer Service (Dual Transport)
 
 **Priority**: 🔴 Critical
-**Status**: Stub exists
+**Status**: ✅ Complete
 
 **V1 approach**: Authorizer loads a snapshot file on startup from `ARBOR_SNAPSHOT_PATH` env var. No file watching — restart to reload.
 
@@ -259,7 +302,9 @@ By end of V1, Arbor will have:
 - ✅ All 4 authorization operations (check, list×3)
 - ✅ Indexer service (writes snapshot file)
 - ✅ Authorizer service with dual transport (UDS + gRPC)
-- ✅ Integration and load tests
+- 🚧 E2E integration tests (Graph → Snapshot → check → verify)
+- 🚧 PostgreSQL connector with YAML config
+- 🚧 Integration and load tests
 
 **Note**: Delta support, client libraries, and observability deferred to post-V1 (saves 2-3 weeks on core engine).
 
@@ -359,10 +404,14 @@ metrics = "0.21"
 metrics-exporter-prometheus = "0.14"
 ```
 
+### V1 (connectors)
+```toml
+sqlx = { version = "0.8", features = ["postgres", "uuid", "runtime-tokio"] }
+```
+
 ### V2+
 ```toml
 aws-sdk-s3 = "1"
-sqlx = { version = "0.8", features = ["postgres"] }
 etcd-client = "0.14"
 ```
 
@@ -370,10 +419,10 @@ etcd-client = "0.14"
 
 ## Immediate Next Steps
 
-1. **Now**: Snapshot serialization (serde + bincode + checksum + compression)
-2. **Then**: Authorization operations (check, list_resources, list_principals, list_actions)
-3. **Then**: Integration tests (Graph → Snapshot → serialize → deserialize → check → verify)
-4. **After that**: Indexer service (write files) + Authorizer service (load files, serve requests)
+1. **Now**: PostgreSQL connector (`arbor-connectors`) with YAML config (Step 4b)
+2. **Then**: CSV connector
+3. **Then**: E2E integration tests (Graph → Snapshot → serialize → deserialize → check → verify)
+4. **After that**: Load testing (indexer → authorizer flow with k6/Locust)
 
 ---
 

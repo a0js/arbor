@@ -41,6 +41,18 @@ If you're new to Arbor, read in this order:
   - Node.js, Rust, Python implementations
   - Performance optimization techniques
 
+- **[arbor-pg](./arbor-pg.md)** - PostgreSQL native extension (potential feature)
+  - Authorization as SQL functions via pgrx
+  - Row Level Security integration
+  - pgvector / RAG query patterns
+  - Performance characteristics and scaling limits
+
+- **[Filter Generation](./filter-generation.md)** - Policy-to-filter predicate pushdown (potential feature)
+  - Condition AST → database-native filter IR
+  - Partial evaluation (principal known, resource unknown)
+  - SQL, MongoDB, Elasticsearch translators
+  - InHierarchy resolution via precomputed closure
+
 - **[Policy Validation](./policy-validation.md)** - Three-stage validation strategy
   - Write time: Reject invalid policies
   - Index time: Skip with alerts (availability)
@@ -103,6 +115,8 @@ If you're new to Arbor, read in this order:
 | policy-validation.md | ✅ Final | 100% |
 | implementation-roadmap.md | ✅ Final | 100% |
 | ysnp-comparison.md | ✅ Final | 100% |
+| arbor-pg.md | 💡 Potential | 100% |
+| filter-generation.md | 💡 Potential | 100% |
 
 ## Design Decisions
 

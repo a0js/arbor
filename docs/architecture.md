@@ -135,13 +135,20 @@ Arbor is a high-performance, graph-based authorization system designed for:
 #### arbor-connectors
 **Purpose**: External system integrations for data ingestion.
 
-**Status**: 🚧 Placeholder (v2+)
+**Status**: 🚧 In progress (V1)
 
-**Intended Functionality**:
-- Database connectors (PostgreSQL, MySQL, DynamoDB)
-- File-based ingestion (CSV, JSON, Parquet)
-- API integrations (REST, GraphQL)
-- Streaming connectors (Kafka, Kinesis)
+**V1 Functionality**:
+- `ConnectorsConfig` and `EntityTypesConfig` — YAML-driven configuration types
+- `Connector` trait: `load(&self) -> ArborResult<Graph>`
+- `PostgresConnector`: runs user-defined SQL queries per entity type, assembles a `Graph`
+- `ExampleConnector`: hardcoded graph for dev/test
+
+**Configuration**: Two YAML files — `config/connectors.yaml` (connection credentials) and `config/entity_types.yaml` (SQL queries per entity type referencing connectors by name). See [connectors.md](./connectors.md) for full details.
+
+**V2+**:
+- CDC connectors (Debezium, database triggers)
+- Streaming connectors (Kafka, Kinesis, NATS)
+- Additional databases (MySQL, DynamoDB)
 
 #### arbor-proto-internal
 **Purpose**: Internal protocol definitions for service communication.

@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arbor-types = { path = "../arbor-types" }
+arbor-graph-core = { path = "../arbor-graph-core" }
+csv = "1.4.0"
+sqlx = { version = "0.9.0", features = ["uuid", "postgres"] }
+config = { version = "0.15.25", features = ["yaml"] }
+serde = { version = "1.0.228", features = ["derive"] }
