@@ -1,4 +1,3 @@
-use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use crate::conditions::{Condition, VariableRef};
 use crate::ids::EntityTypeId;
@@ -96,14 +95,7 @@ pub struct IndexedPolicy {
     pub idx: u32,
     pub principal_target: IndexedPolicyTarget,
     pub resource_target: IndexedPolicyTarget,
-    pub actions: RoaringBitmap,
     pub conditions: Option<CompiledCondition>,
     pub is_forbidding: bool,
     pub is_conditional: bool,
-    /// Precomputed transitive descendants of the principal target entity.
-    /// `Some` only when `principal_target` is `EntityWithDescendants`; `None` otherwise.
-    pub principal_descendants: Option<RoaringBitmap>,
-    /// Precomputed transitive descendants of the resource target entity.
-    /// `Some` only when `resource_target` is `EntityWithDescendants`; `None` otherwise.
-    pub resource_descendants: Option<RoaringBitmap>,
 }

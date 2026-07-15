@@ -136,12 +136,22 @@ fn action_uuid(name: &str) -> Uuid {
 pub struct BenchFixtures {
     /// A user that has a matching permit policy — `check()` should return Permit.
     pub permitted_principal: u32,
-    /// A user with no matching policy — `check()` should return Deny.
+    /// A user with no entity-/hierarchy-specific policy match for `read`.
+    /// Still matches the global `EntityType(User) -> EntityType(File), read`
+    /// permit (policy 2), so `check(denied_principal, action, resource)` is
+    /// `Permit`, not `Deny` -- despite the name, this fixture demonstrates
+    /// "denied everything except the type-wide grant", not "denied outright".
+    /// Use `delete_action` for a genuine Deny case (policy 4 forbids delete
+    /// for `EntityType(User) -> EntityType(File)` with no overriding permit).
     pub denied_principal: u32,
     /// A deeply-nested file node that exercises the ancestor walk.
     pub resource: u32,
     /// Index of the "read" action.
     pub action: u32,
+    /// Index of the "delete" action -- forbidden for `EntityType(User) ->
+    /// EntityType(File)` by policy 4, with no permit to override it, so
+    /// `check(_, delete_action, _)` for a plain user against `resource` is Deny.
+    pub delete_action: u32,
     /// `EntityTypeId` for the "file" type, used in `list_entities`.
     pub file_type: EntityTypeId,
 }
@@ -580,12 +590,15 @@ pub fn build_scenario(n_entities: usize) -> (Snapshot, BenchFixtures) {
         .expect("specific file not in snapshot");
     let action = *uuid_to_index.get(&read_id)
         .expect("read action not in snapshot");
+    let delete_action = *uuid_to_index.get(&delete_id)
+        .expect("delete action not in snapshot");
 
     let fixtures = BenchFixtures {
         permitted_principal,
         denied_principal,
         resource,
         action,
+        delete_action,
         file_type,
     };
 

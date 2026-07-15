@@ -20,7 +20,11 @@
 //! would turn `Missing == X → false` into `NOT false → true`, creating an
 //! authorization bypass for conditions like `permit if principal.tier != "restricted"`.
 
-use arbor_types::{AttributeValue, ConditionResult, ResolvedEntityIndex, EntityTypeId, EvaluationContext, EvaluationError, OpCode, VariableRef, VariableScope};
+use arbor_types::{
+    resolve_nested_attribute, Attributes, AttributeValue, ConditionResult, EntityResolver,
+    EntityTypeId, EvaluationContext, EvaluationError, IndexedAttributeValue, OpCode,
+    ResolvedEntityIndex, VariableRef, VariableScope,
+};
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
@@ -238,55 +242,122 @@ impl BytecodeVM {
 
     fn execute_push_variable(&mut self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Result<(), String> {
         // When the path is empty the variable refers to the entity itself (synthesised EntityRef).
-        // We materialise that value inline so that `resolve_variable` can return a plain reference
-        // for every other case and avoid a clone on the hot path.
-        let synthesised;
-        let resolved: Option<&AttributeValue> = if var_ref.path.is_empty() {
-            let idx = match var_ref.scope {
-                VariableScope::Principal => Some(ctx.principal.idx),
-                VariableScope::Resource => Some(ctx.resource.idx),
-                VariableScope::Context => None,
-            };
-            synthesised = idx.map(AttributeValue::EntityRef);
-            synthesised.as_ref()
+        let value = if var_ref.path.is_empty() {
+            match var_ref.scope {
+                VariableScope::Principal => StackValue::EntityRef(ctx.principal.idx),
+                VariableScope::Resource => StackValue::EntityRef(ctx.resource.idx),
+                VariableScope::Context => StackValue::Missing,
+            }
         } else {
-            self.resolve_variable(var_ref, ctx)
-        };
-
-        let value = match resolved {
-            Some(AttributeValue::String(s)) => StackValue::String(s.clone()),
-            Some(AttributeValue::Float(f)) => StackValue::Float(*f),
-            Some(AttributeValue::Integer(i)) => StackValue::Integer(*i),
-            Some(AttributeValue::Bool(b)) => StackValue::Bool(*b),
-            Some(AttributeValue::IpAddr(ip)) => StackValue::IpAddr(*ip),
-            Some(AttributeValue::IpNetwork(net)) => StackValue::IpNetwork(*net),
-            Some(AttributeValue::Timestamp(t)) => StackValue::Timestamp(*t),
-            Some(AttributeValue::EntityRef(u)) => StackValue::EntityRef(*u),
-            Some(AttributeValue::Set(s)) => StackValue::Set(s.clone()),
-            // Objects cannot be directly compared; treat as Missing.
-            Some(AttributeValue::Object(_)) | None => StackValue::Missing,
+            self.resolve_variable(var_ref, ctx).unwrap_or(StackValue::Missing)
         };
         self.stack.push(value);
         Ok(())
     }
 
-    /// Resolve an attribute path to its value. Returns a reference to avoid
-    /// cloning on the hot path. Returns `None` if the path does not exist or if
-    /// context attributes are absent for a Context-scoped variable.
+    /// Resolve an attribute path directly to a `StackValue`. Returns `None`
+    /// if the path does not exist or if context attributes are absent for a
+    /// Context-scoped variable.
+    ///
+    /// Principal/Resource attributes are resolved through `ctx.entities`'
+    /// shared attribute arena (`IndexedAttributeValue`); Context attributes
+    /// are a plain, per-request `Attributes` (never persisted, so never
+    /// arena-backed) -- the two scopes need genuinely different resolution
+    /// paths, unified here into one `StackValue` result.
     ///
     /// Callers that need to handle the empty-path (entity-self) case must do so
     /// before calling this function; `resolve_variable` returns `None` for an
     /// empty path.
-    fn resolve_variable<'ctx>(&self, var_ref: &VariableRef, ctx: &'ctx EvaluationContext<'_>) -> Option<&'ctx AttributeValue> {
+    fn resolve_variable(&self, var_ref: &VariableRef, ctx: &EvaluationContext<'_>) -> Option<StackValue> {
         if var_ref.path.is_empty() {
             return None;
         }
-        let base = match var_ref.scope {
-            VariableScope::Principal => &ctx.principal.attributes,
-            VariableScope::Resource => &ctx.resource.attributes,
-            VariableScope::Context => ctx.context_attrs?,
-        };
-        base.get_nested(&var_ref.path)
+        match var_ref.scope {
+            VariableScope::Context => {
+                let value = ctx.context_attrs?.get_nested(&var_ref.path)?;
+                Some(Self::attribute_value_to_stack(value))
+            }
+            VariableScope::Principal | VariableScope::Resource => {
+                let base = match var_ref.scope {
+                    VariableScope::Principal => ctx.principal.attributes,
+                    VariableScope::Resource => ctx.resource.attributes,
+                    VariableScope::Context => unreachable!(),
+                };
+                let value = resolve_nested_attribute(ctx.entities, base, &var_ref.path)?;
+                Some(Self::indexed_attribute_value_to_stack(ctx.entities, value))
+            }
+        }
+    }
+
+    fn attribute_value_to_stack(v: &AttributeValue) -> StackValue {
+        match v {
+            AttributeValue::String(s) => StackValue::String(s.clone()),
+            AttributeValue::Float(f) => StackValue::Float(*f),
+            AttributeValue::Integer(i) => StackValue::Integer(*i),
+            AttributeValue::Bool(b) => StackValue::Bool(*b),
+            AttributeValue::IpAddr(ip) => StackValue::IpAddr(*ip),
+            AttributeValue::IpNetwork(net) => StackValue::IpNetwork(*net),
+            AttributeValue::Timestamp(t) => StackValue::Timestamp(*t),
+            AttributeValue::EntityRef(u) => StackValue::EntityRef(*u),
+            AttributeValue::Set(s) => StackValue::Set(s.clone()),
+            // Objects cannot be directly compared; treat as Missing.
+            AttributeValue::Object(_) => StackValue::Missing,
+        }
+    }
+
+    fn indexed_attribute_value_to_stack(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> StackValue {
+        match v {
+            IndexedAttributeValue::String(s) => StackValue::String(s.clone()),
+            IndexedAttributeValue::Float(f) => StackValue::Float(*f),
+            IndexedAttributeValue::Integer(i) => StackValue::Integer(*i),
+            IndexedAttributeValue::Bool(b) => StackValue::Bool(*b),
+            IndexedAttributeValue::IpAddr(ip) => StackValue::IpAddr(*ip),
+            IndexedAttributeValue::IpNetwork(net) => StackValue::IpNetwork(*net),
+            IndexedAttributeValue::Timestamp(t) => StackValue::Timestamp(*t),
+            IndexedAttributeValue::EntityRef(u) => StackValue::EntityRef(*u),
+            IndexedAttributeValue::Set(set_ref) => StackValue::Set(
+                entities
+                    .attribute_set_values(*set_ref)
+                    .iter()
+                    .map(|e| Self::indexed_to_attribute_value(entities, e))
+                    .collect(),
+            ),
+            // Objects cannot be directly compared; treat as Missing.
+            IndexedAttributeValue::Object(_) => StackValue::Missing,
+        }
+    }
+
+    /// Converts an arena-backed `IndexedAttributeValue` into an owned
+    /// `AttributeValue` -- needed only to materialize `Set` elements onto
+    /// `StackValue::Set(Vec<AttributeValue>)`, which stays the pre-arena type
+    /// since `Set`/`ContainsAll`/`ContainsAny` are unaffected by this change.
+    /// Recurses through `entities` for the (rare) case of a nested
+    /// `Object`/`Set` inside a `Set`.
+    fn indexed_to_attribute_value(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> AttributeValue {
+        match v {
+            IndexedAttributeValue::String(s) => AttributeValue::String(s.clone()),
+            IndexedAttributeValue::Float(f) => AttributeValue::Float(*f),
+            IndexedAttributeValue::Integer(i) => AttributeValue::Integer(*i),
+            IndexedAttributeValue::Bool(b) => AttributeValue::Bool(*b),
+            IndexedAttributeValue::IpAddr(ip) => AttributeValue::IpAddr(*ip),
+            IndexedAttributeValue::IpNetwork(net) => AttributeValue::IpNetwork(net.clone()),
+            IndexedAttributeValue::Timestamp(t) => AttributeValue::Timestamp(*t),
+            IndexedAttributeValue::EntityRef(u) => AttributeValue::EntityRef(*u),
+            IndexedAttributeValue::Set(set_ref) => AttributeValue::Set(
+                entities
+                    .attribute_set_values(*set_ref)
+                    .iter()
+                    .map(|e| Self::indexed_to_attribute_value(entities, e))
+                    .collect(),
+            ),
+            IndexedAttributeValue::Object(obj_ref) => {
+                let mut attrs = Attributes::new();
+                for (name, value) in entities.attribute_pairs(*obj_ref) {
+                    attrs.set(*name, Self::indexed_to_attribute_value(entities, value));
+                }
+                AttributeValue::Object(attrs)
+            }
+        }
     }
 
     // ===== Attribute Operations =====
@@ -620,7 +691,7 @@ impl BytecodeVM {
                         VariableScope::Context => Err("Context scope cannot be used as entity ref in InHierarchy".into()),
                     }
                 } else {
-                    let Some(&AttributeValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
+                    let Some(StackValue::EntityRef(ent)) = self.resolve_variable(var_ref, ctx) else {
                         return Err("Variable must resolve to EntityRef".into());
                     };
                     Ok(ent)
@@ -633,11 +704,11 @@ impl BytecodeVM {
         let desc_idx = self.resolve_entity_index(descendant, ctx)?;
         let anc_idx = self.resolve_entity_index(ancestor, ctx)?;
 
-        let Some(desc) = ctx.entities.get_entity(desc_idx) else {
+        let Some(ancestors) = ctx.entities.ancestors_of(desc_idx) else {
             return Err("Entity not found".into());
         };
 
-        self.stack.push(StackValue::Bool(desc.ancestors.contains(anc_idx)));
+        self.stack.push(StackValue::Bool(ancestors.binary_search(&anc_idx).is_ok()));
         Ok(())
     }
 
@@ -815,34 +886,87 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use arbor_types::{
-        AttributeNameId, AttributeValue, Attributes, EntityResolver, EntityTypeId, IndexedEntity,
-        VariableRef, VariableScope,
+        flatten_attributes, AttributeNameId, AttributeValue, Attributes, EntityResolver,
+        EntityTypeId, IndexedAttributeValue, IndexedEntity, SortedSetRef, VariableRef,
+        VariableScope,
     };
-    use roaring::RoaringBitmap;
 
     // ── Test infrastructure ───────────────────────────────────────────────────
 
-    /// Resolver that always returns None — for tests that don't use InHierarchy(Variable).
+    /// Resolver that always returns None/empty — for tests that don't use
+    /// InHierarchy(Variable) or real attribute values (an entity built with
+    /// `SortedSetRef::EMPTY` resolves to an empty slice regardless of which
+    /// resolver backs it, so this is safe for those).
     struct NoopResolver;
 
     impl EntityResolver for NoopResolver {
         fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
+        fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
+        fn attribute_pairs(&self, _: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] { &[] }
+        fn attribute_set_values(&self, _: SortedSetRef) -> &[IndexedAttributeValue] { &[] }
+    }
+
+    /// Minimal resolver for tests that only need attribute resolution (no
+    /// InHierarchy/entity-index lookups) -- holds the attribute arena a
+    /// `make_entity_with_attr`-built entity's `SortedSetRef` points into.
+    struct AttrResolver {
+        pairs: Vec<(AttributeNameId, IndexedAttributeValue)>,
+        values: Vec<IndexedAttributeValue>,
+    }
+
+    impl EntityResolver for AttrResolver {
+        fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
+        fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
+        fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
+            &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+        }
+        fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
+            &self.values[range.offset as usize..(range.offset + range.len) as usize]
+        }
     }
 
     /// HashMap-based resolver — for InHierarchy tests that need entity lookups.
-    struct MapResolver(HashMap<u32, IndexedEntity>);
+    /// Each entity carries its own ancestors `Vec` alongside it (test-only;
+    /// production uses a single shared arena on `Snapshot`). Attribute arenas
+    /// (`pairs`/`values`) are shared across all entities registered with one
+    /// `MapResolver`, matching how `Snapshot` shares one arena per field.
+    struct MapResolver {
+        entities: HashMap<u32, (IndexedEntity, Vec<u32>)>,
+        pairs: Vec<(AttributeNameId, IndexedAttributeValue)>,
+        values: Vec<IndexedAttributeValue>,
+    }
 
     impl MapResolver {
-        fn new() -> Self { Self(HashMap::new()) }
-        fn insert(mut self, entity: IndexedEntity) -> Self {
-            self.0.insert(entity.idx, entity);
+        fn new() -> Self {
+            Self { entities: HashMap::new(), pairs: Vec::new(), values: Vec::new() }
+        }
+        fn insert(mut self, entity: IndexedEntity, ancestors: Vec<u32>) -> Self {
+            self.entities.insert(entity.idx, (entity, ancestors));
+            self
+        }
+        /// Flattens `attrs` into this resolver's shared arena and attaches
+        /// the resulting `SortedSetRef` to the already-inserted entity `idx`.
+        fn with_attributes(mut self, idx: u32, attrs: &Attributes) -> Self {
+            let range = flatten_attributes(attrs, &mut self.pairs, &mut self.values);
+            if let Some((entity, _)) = self.entities.get_mut(&idx) {
+                entity.attributes = range;
+            }
             self
         }
     }
 
     impl EntityResolver for MapResolver {
         fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
-            self.0.get(&index)
+            self.entities.get(&index).map(|(e, _)| e)
+        }
+        fn ancestors_of(&self, index: u32) -> Option<&[u32]> {
+            self.entities.get(&index).map(|(_, a)| a.as_slice())
+        }
+        fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
+            &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+        }
+        fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
+            &self.values[range.offset as usize..(range.offset + range.len) as usize]
         }
     }
 
@@ -851,9 +975,9 @@ mod tests {
     fn make_test_entity() -> IndexedEntity {
         IndexedEntity {
             idx: 0,
-            attributes: Attributes::new(),
+            attributes: SortedSetRef::EMPTY,
             entity_type: EntityTypeId::new(1),
-            ancestors: RoaringBitmap::new(),
+            ancestors: SortedSetRef::EMPTY,
             principal_of_policies: None,
             resource_of_policies: None,
             effective_principal_policies: None,
@@ -864,9 +988,9 @@ mod tests {
     fn make_entity_at(idx: u32) -> IndexedEntity {
         IndexedEntity {
             idx,
-            attributes: Attributes::new(),
+            attributes: SortedSetRef::EMPTY,
             entity_type: EntityTypeId::new(1),
-            ancestors: RoaringBitmap::new(),
+            ancestors: SortedSetRef::EMPTY,
             principal_of_policies: None,
             resource_of_policies: None,
             effective_principal_policies: None,
@@ -874,18 +998,28 @@ mod tests {
         }
     }
 
-    fn make_entity_with_attr(attr_id: u32, value: AttributeValue) -> IndexedEntity {
+    /// Returns the entity (with its `attributes` `SortedSetRef` already
+    /// pointing into the returned resolver's arena) plus the `AttrResolver`
+    /// it must be evaluated with.
+    fn make_entity_with_attr(attr_id: u32, value: AttributeValue) -> (IndexedEntity, AttrResolver) {
+        let mut attrs = Attributes::new();
+        attrs.set(AttributeNameId::new(attr_id), value);
+        let mut pairs = Vec::new();
+        let mut values = Vec::new();
+        let range = flatten_attributes(&attrs, &mut pairs, &mut values);
         let mut entity = make_test_entity();
-        entity.attributes.set(AttributeNameId::new(attr_id), value);
-        entity
+        entity.attributes = range;
+        (entity, AttrResolver { pairs, values })
     }
 
-    fn make_entity_with_ancestors(idx: u32, ancestors: &[u32]) -> IndexedEntity {
-        let mut entity = make_entity_at(idx);
-        for &a in ancestors {
-            entity.ancestors.insert(a);
-        }
-        entity
+    /// Returns the entity (with an empty `ancestors` ref — this test resolver
+    /// tracks ancestors separately, not via a shared arena) plus its sorted
+    /// ancestor list for registering with `MapResolver::insert`.
+    fn make_entity_with_ancestors(idx: u32, ancestors: &[u32]) -> (IndexedEntity, Vec<u32>) {
+        let entity = make_entity_at(idx);
+        let mut sorted = ancestors.to_vec();
+        sorted.sort_unstable();
+        (entity, sorted)
     }
 
     fn var_ref_principal(attr_id: u32) -> VariableRef {
@@ -1108,9 +1242,9 @@ mod tests {
 
     #[test]
     fn test_has_attribute_present() {
-        let principal = make_entity_with_attr(1, AttributeValue::Bool(true));
+        let (principal, resolver) = make_entity_with_attr(1, AttributeValue::Bool(true));
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::HasAttribute(var_ref_principal(1))], &ctx);
         assert_eq!(result, ConditionResult::True);
@@ -1130,9 +1264,9 @@ mod tests {
 
     #[test]
     fn test_variable_resolution_eq() {
-        let principal = make_entity_with_attr(1, AttributeValue::String("gold".into()));
+        let (principal, resolver) = make_entity_with_attr(1, AttributeValue::String("gold".into()));
         let resource = make_test_entity();
-        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
             OpCode::PushVariable(var_ref_principal(1)),
@@ -1435,9 +1569,9 @@ mod tests {
     #[test]
     fn test_in_hierarchy_self_inclusive() {
         // Principal at idx=0, ancestors=[5]. InHierarchy(Variable(Principal), Direct(5)) → true.
-        let principal = make_entity_with_ancestors(0, &[5]);
+        let (principal, principal_ancestors) = make_entity_with_ancestors(0, &[5]);
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(principal.clone());
+        let resolver = MapResolver::new().insert(principal.clone(), principal_ancestors);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1450,9 +1584,9 @@ mod tests {
     #[test]
     fn test_in_hierarchy_ancestor_match() {
         // Principal has ancestors [10, 20, 30]. Check InHierarchy(principal, 20) → true.
-        let principal = make_entity_with_ancestors(0, &[10, 20, 30]);
+        let (principal, principal_ancestors) = make_entity_with_ancestors(0, &[10, 20, 30]);
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(principal.clone());
+        let resolver = MapResolver::new().insert(principal.clone(), principal_ancestors);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1464,9 +1598,9 @@ mod tests {
 
     #[test]
     fn test_in_hierarchy_no_match() {
-        let principal = make_entity_with_ancestors(0, &[10, 20]);
+        let (principal, principal_ancestors) = make_entity_with_ancestors(0, &[10, 20]);
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(principal.clone());
+        let resolver = MapResolver::new().insert(principal.clone(), principal_ancestors);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1480,8 +1614,8 @@ mod tests {
     fn test_in_hierarchy_resource_scope() {
         // Resource at idx=1, ancestors=[7]. InHierarchy(Variable(Resource), Direct(7)) → true.
         let principal = make_entity_at(0);
-        let resource = make_entity_with_ancestors(1, &[7]);
-        let resolver = MapResolver::new().insert(resource.clone());
+        let (resource, resource_ancestors) = make_entity_with_ancestors(1, &[7]);
+        let resolver = MapResolver::new().insert(resource.clone(), resource_ancestors);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1508,10 +1642,10 @@ mod tests {
     #[test]
     fn test_in_hierarchy_combined_with_type_check() {
         // `permit if principal is Admin AND principal in AdminGroup`
-        let mut principal = make_entity_with_ancestors(0, &[100]);
+        let (mut principal, principal_ancestors) = make_entity_with_ancestors(0, &[100]);
         principal.entity_type = EntityTypeId::new(42);
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(principal.clone());
+        let resolver = MapResolver::new().insert(principal.clone(), principal_ancestors);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[
@@ -1535,10 +1669,15 @@ mod tests {
         // principal.manager_ref = EntityRef(10u32)
         // manager entity at index 10, ancestors [10, 50] (self + AdminGroup)
         // InHierarchy(Variable(principal.manager_ref), Direct(50)) → true
-        let manager = make_entity_with_ancestors(10, &[10, 50]);
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(10u32));
+        let (manager, manager_ancestors) = make_entity_with_ancestors(10, &[10, 50]);
+        let mut attrs = Attributes::new();
+        attrs.set(AttributeNameId::new(1), AttributeValue::EntityRef(10u32));
+        let resolver = MapResolver::new()
+            .insert(manager, manager_ancestors)
+            .insert(make_entity_at(0), vec![])
+            .with_attributes(0, &attrs);
+        let principal = resolver.get_entity(0).unwrap().clone();
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(manager);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1551,10 +1690,15 @@ mod tests {
     #[test]
     fn test_in_hierarchy_attr_no_match() {
         // manager at index 10, only self in ancestors — not in group 50
-        let manager = make_entity_with_ancestors(10, &[10]);
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(10u32));
+        let (manager, manager_ancestors) = make_entity_with_ancestors(10, &[10]);
+        let mut attrs = Attributes::new();
+        attrs.set(AttributeNameId::new(1), AttributeValue::EntityRef(10u32));
+        let resolver = MapResolver::new()
+            .insert(manager, manager_ancestors)
+            .insert(make_entity_at(0), vec![])
+            .with_attributes(0, &attrs);
+        let principal = resolver.get_entity(0).unwrap().clone();
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new().insert(manager);
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1583,9 +1727,10 @@ mod tests {
     fn test_in_hierarchy_attr_unknown_index_is_invalid() {
         // Attribute holds index 999, which is not present in the resolver.
         // get_entity(999) returns None → Err → Invalid.
-        let principal = make_entity_with_attr(1, AttributeValue::EntityRef(999u32));
+        // AttrResolver's get_entity always returns None, which is exactly
+        // what this test needs (999 unregistered) -- no MapResolver required.
+        let (principal, resolver) = make_entity_with_attr(1, AttributeValue::EntityRef(999u32));
         let resource = make_entity_at(1);
-        let resolver = MapResolver::new(); // empty — index 999 not registered
         let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
@@ -1598,9 +1743,9 @@ mod tests {
     #[test]
     fn test_in_hierarchy_attr_wrong_type_is_invalid() {
         // Attribute holds a String, not an EntityRef → pattern match fails → Invalid.
-        let principal = make_entity_with_attr(1, AttributeValue::String("not-an-entity".into()));
+        let (principal, resolver) = make_entity_with_attr(1, AttributeValue::String("not-an-entity".into()));
         let resource = make_entity_at(1);
-        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
         let result = vm.evaluate(&[OpCode::InHierarchy(
             ResolvedEntityIndex::Variable(var_ref_principal(1)),
@@ -1641,8 +1786,8 @@ mod tests {
         let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
         let mut _vm_placeholder = BytecodeVM::new();
 
-        let principal = make_entity_with_attr(2, AttributeValue::String("value".into()));
-        let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+        let (principal, resolver) = make_entity_with_attr(2, AttributeValue::String("value".into()));
+        let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
         let mut vm = BytecodeVM::new();
 
         let instructions = vec![

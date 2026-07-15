@@ -75,20 +75,44 @@ impl Entity {
     }
 }
 
+/// A slice into a shared, sorted `u32` arena — `offset`/`len` index into a
+/// `Vec<u32>` owned elsewhere (the `Snapshot`'s per-field arena).
+///
+/// Used in place of `RoaringBitmap` for per-entity sets small enough (tens of
+/// elements, scattered across up to millions of possible indices) that
+/// Roaring's container machinery is pure allocation overhead with no
+/// compression benefit. See `ancestors_arena` on `Snapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SortedSetRef {
+    pub offset: u32,
+    pub len: u32,
+}
+
+impl SortedSetRef {
+    pub const EMPTY: Self = Self { offset: 0, len: 0 };
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexedEntity {
     pub idx: u32,
-    pub attributes: Attributes,
+    /// The entity's own attribute set -- a `SortedSetRef` into
+    /// `Snapshot::attribute_pairs_arena`, i.e. it's treated identically to a
+    /// nested `IndexedAttributeValue::Object`.
+    pub attributes: SortedSetRef,
     pub entity_type: EntityTypeId,
-    pub ancestors: RoaringBitmap,
-    pub principal_of_policies: Option<RoaringBitmap>,
-    pub resource_of_policies: Option<RoaringBitmap>,
+    pub ancestors: SortedSetRef,
+    pub principal_of_policies: Option<SortedSetRef>,
+    pub resource_of_policies: Option<SortedSetRef>,
     /// Precomputed union of all policies that apply to this entity as a principal.
     /// Set by the snapshot builder after all entities and policies are processed.
-    pub effective_principal_policies: Option<RoaringBitmap>,
+    pub effective_principal_policies: Option<SortedSetRef>,
     /// Precomputed union of all policies that apply to this entity as a resource.
     /// Set by the snapshot builder after all entities and policies are processed.
-    pub effective_resource_policies: Option<RoaringBitmap>,
+    pub effective_resource_policies: Option<SortedSetRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,6 +125,14 @@ pub struct IndexedEntityType {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IndexedNode {
     Entity(IndexedEntity),
-    Policy(IndexedPolicy),
+    /// Boxed because `IndexedPolicy` (144 bytes -- several inline
+    /// `RoaringBitmap`s) is roughly 2x the size of `IndexedEntity` (72
+    /// bytes). Without boxing, the enum sizes to its largest variant, so
+    /// every `Entity` node -- millions of them -- would pay for space only
+    /// the much rarer `Policy` variant needs. `Box` is pointer-sized
+    /// regardless of the boxed type, so this nearly halves every entity
+    /// node's footprint at the cost of one extra pointer hop on the rare
+    /// path that reads a full policy.
+    Policy(Box<IndexedPolicy>),
     Other,
 }

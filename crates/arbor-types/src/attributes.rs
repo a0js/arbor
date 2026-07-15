@@ -1,3 +1,4 @@
+use crate::entities::SortedSetRef;
 use crate::ids::AttributeNameId;
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
@@ -18,6 +19,32 @@ pub enum AttributeValue {
     EntityRef(u32),          // Reference to another entity
     Set(Vec<AttributeValue>), // Set of attribute values
     Object(Attributes),       // Nested attributes object
+}
+
+/// The indexed/persisted counterpart of `AttributeValue`, used only by
+/// `IndexedEntity::attributes`. Identical shape except `Object` and `Set`
+/// recurse via a `SortedSetRef` into `Snapshot`'s shared attribute arenas
+/// instead of an owned nested `Attributes`/`Vec` -- one flat arena regardless
+/// of nesting depth, same reasoning as `ancestors`/`effective_*_policies`.
+///
+/// `Object`'s `SortedSetRef` indexes both `attribute_names_arena` and
+/// `attribute_set_values_arena` in lockstep (field `k`'s name is
+/// `names[offset+k]`, value is `values[offset+k]`). `Set`'s `SortedSetRef`
+/// indexes `attribute_set_values_arena` only -- elements are unnamed, so the
+/// corresponding `names_arena` slots are unused placeholders, keeping the
+/// two arrays the same length without needing a named/unnamed split.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IndexedAttributeValue {
+    String(String),
+    Float(OrderedFloat<f64>),
+    Integer(i64),
+    Bool(bool),
+    Timestamp(DateTime<Utc>),
+    IpAddr(IpAddr),
+    IpNetwork(IpNet),
+    EntityRef(u32),
+    Set(SortedSetRef),
+    Object(SortedSetRef),
 }
 
 /// Attributes wrapper that provides efficient nested object support
@@ -148,5 +175,63 @@ impl Attributes {
 impl Default for Attributes {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Flattens a graph-level `Attributes` (`BTreeMap`) into `pairs_arena`,
+/// returning a `SortedSetRef` over the range just written. Depth-first:
+/// nested `Object`/`Set` values are flattened first, so their own
+/// `SortedSetRef`s are known before this range is finalized.
+///
+/// `Attributes::iter()` yields keys in ascending order (`BTreeMap`), so the
+/// resulting arena range stays sorted by name -- required for
+/// `resolve_nested_attribute`'s `binary_search_by_key`.
+///
+/// Shared by the real indexer (`snapshot_builder.rs`) and test fixtures that
+/// need to build an arena-backed `IndexedEntity` by hand, so the two never
+/// drift apart.
+pub fn flatten_attributes(
+    attrs: &Attributes,
+    pairs_arena: &mut Vec<(AttributeNameId, IndexedAttributeValue)>,
+    values_arena: &mut Vec<IndexedAttributeValue>,
+) -> SortedSetRef {
+    let offset = pairs_arena.len() as u32;
+    for (&name, value) in attrs.iter() {
+        let indexed_value = flatten_value(value, pairs_arena, values_arena);
+        pairs_arena.push((name, indexed_value));
+    }
+    SortedSetRef { offset, len: (pairs_arena.len() as u32) - offset }
+}
+
+/// Flattens a single `AttributeValue` into its `IndexedAttributeValue`
+/// counterpart, recursing into `values_arena`/`pairs_arena` for `Set`/`Object`.
+pub fn flatten_value(
+    value: &AttributeValue,
+    pairs_arena: &mut Vec<(AttributeNameId, IndexedAttributeValue)>,
+    values_arena: &mut Vec<IndexedAttributeValue>,
+) -> IndexedAttributeValue {
+    match value {
+        AttributeValue::String(s) => IndexedAttributeValue::String(s.clone()),
+        AttributeValue::Float(f) => IndexedAttributeValue::Float(*f),
+        AttributeValue::Integer(i) => IndexedAttributeValue::Integer(*i),
+        AttributeValue::Bool(b) => IndexedAttributeValue::Bool(*b),
+        AttributeValue::Timestamp(t) => IndexedAttributeValue::Timestamp(*t),
+        AttributeValue::IpAddr(ip) => IndexedAttributeValue::IpAddr(*ip),
+        AttributeValue::IpNetwork(net) => IndexedAttributeValue::IpNetwork(net.clone()),
+        AttributeValue::EntityRef(u) => IndexedAttributeValue::EntityRef(*u),
+        AttributeValue::Set(elems) => {
+            let offset = values_arena.len() as u32;
+            for e in elems {
+                let indexed = flatten_value(e, pairs_arena, values_arena);
+                values_arena.push(indexed);
+            }
+            IndexedAttributeValue::Set(SortedSetRef {
+                offset,
+                len: (values_arena.len() as u32) - offset,
+            })
+        }
+        AttributeValue::Object(nested) => {
+            IndexedAttributeValue::Object(flatten_attributes(nested, pairs_arena, values_arena))
+        }
     }
 }

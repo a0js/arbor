@@ -31,8 +31,14 @@ fn main() {
     let ancestor_sets: Vec<Vec<u32>> = snapshot
         .nodes
         .iter()
-        .filter_map(|node| match node {
-            IndexedNode::Entity(e) => Some(e.ancestors.iter().collect::<Vec<u32>>()),
+        .enumerate()
+        .filter_map(|(idx, node)| match node {
+            IndexedNode::Entity(_) => Some(
+                snapshot
+                    .ancestors_of(idx as u32)
+                    .expect("entity must resolve its own ancestors")
+                    .to_vec(),
+            ),
             _ => None,
         })
         .collect();

@@ -25,20 +25,11 @@ fn main() {
     let mut principal_sets: Vec<Vec<u32>> = Vec::new();
     let mut resource_sets: Vec<Vec<u32>> = Vec::new();
 
-    for node in &snapshot.nodes {
-        if let IndexedNode::Entity(e) = node {
-            principal_sets.push(
-                e.effective_principal_policies
-                    .as_ref()
-                    .map(|b| b.iter().collect())
-                    .unwrap_or_default(),
-            );
-            resource_sets.push(
-                e.effective_resource_policies
-                    .as_ref()
-                    .map(|b| b.iter().collect())
-                    .unwrap_or_default(),
-            );
+    for (idx, node) in snapshot.nodes.iter().enumerate() {
+        if let IndexedNode::Entity(_) = node {
+            let idx = idx as u32;
+            principal_sets.push(snapshot.effective_principal_of(idx).to_vec());
+            resource_sets.push(snapshot.effective_resource_of(idx).to_vec());
         }
     }
 

@@ -1,5 +1,9 @@
 #![cfg(any(test, feature = "test_utils"))]
-use arbor_types::{Condition, ConditionResult, EvaluationContext, EvaluationError, Operand, AttributeValue, VariableScope, VariableRef};
+use arbor_types::{
+    resolve_nested_attribute, Attributes, AttributeValue, Condition, ConditionResult,
+    EntityResolver, EvaluationContext, EvaluationError, IndexedAttributeValue, Operand,
+    VariableRef, VariableScope,
+};
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
@@ -325,8 +329,8 @@ fn eval_cond(condition: &Condition, context: &EvaluationContext) -> Result<bool,
                 Val::Missing => return Ok(false),
                 _ => return Err(EvaluationError::ExecutionError("InHierarchy requires EntityRef left".into())),
             };
-            match context.entities.get_entity(entity_idx) {
-                Some(entity) => Ok(entity.ancestors.contains(target_idx)),
+            match context.entities.ancestors_of(entity_idx) {
+                Some(ancestors) => Ok(ancestors.binary_search(&target_idx).is_ok()),
                 None => Err(EvaluationError::MissingEntity { entity_index: entity_idx }),
             }
         }
@@ -371,17 +375,83 @@ fn eval_operand(op: &Operand, context: &EvaluationContext) -> Result<Val, Evalua
             }
             Ok(Val::Set(vals))
         }
-        Operand::Variable(v) => Ok(resolve_variable(v, context).map(Val::from).unwrap_or(Val::Missing)),
+        Operand::Variable(v) => Ok(resolve_variable(v, context).unwrap_or(Val::Missing)),
     }
 }
 
-fn resolve_variable(var_ref: &VariableRef, context: &EvaluationContext) -> Option<AttributeValue> {
-    let base = match var_ref.scope {
-        VariableScope::Principal => &context.principal.attributes,
-        VariableScope::Resource => &context.resource.attributes,
-        VariableScope::Context => context.context_attrs?,
-    };
-    base.get_nested(&var_ref.path).cloned()
+/// Principal/Resource attributes resolve through `context.entities`' shared
+/// attribute arena (`IndexedAttributeValue`); Context attributes are a
+/// plain, per-request `Attributes` (never persisted, never arena-backed) --
+/// see `bytecode_vm::resolve_variable` for the identical split, kept
+/// independently implemented here since this file exists specifically to
+/// cross-check the VM's semantics.
+fn resolve_variable(var_ref: &VariableRef, context: &EvaluationContext) -> Option<Val> {
+    match var_ref.scope {
+        VariableScope::Context => {
+            let value = context.context_attrs?.get_nested(&var_ref.path)?;
+            Some(Val::from(value.clone()))
+        }
+        VariableScope::Principal | VariableScope::Resource => {
+            let base = match var_ref.scope {
+                VariableScope::Principal => context.principal.attributes,
+                VariableScope::Resource => context.resource.attributes,
+                VariableScope::Context => unreachable!(),
+            };
+            let value = resolve_nested_attribute(context.entities, base, &var_ref.path)?;
+            Some(indexed_attribute_value_to_val(context.entities, value))
+        }
+    }
+}
+
+fn indexed_attribute_value_to_val(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> Val {
+    match v {
+        IndexedAttributeValue::String(s) => Val::String(s.clone()),
+        IndexedAttributeValue::Float(f) => Val::Float(*f),
+        IndexedAttributeValue::Integer(i) => Val::Integer(*i),
+        IndexedAttributeValue::Bool(b) => Val::Bool(*b),
+        IndexedAttributeValue::IpAddr(ip) => Val::IpAddr(*ip),
+        IndexedAttributeValue::IpNetwork(net) => Val::IpNetwork(*net),
+        IndexedAttributeValue::Timestamp(t) => Val::Timestamp(*t),
+        IndexedAttributeValue::EntityRef(u) => Val::EntityRef(*u),
+        IndexedAttributeValue::Set(set_ref) => Val::Set(
+            entities
+                .attribute_set_values(*set_ref)
+                .iter()
+                .map(|e| indexed_to_attribute_value(entities, e))
+                .collect(),
+        ),
+        IndexedAttributeValue::Object(_) => Val::Missing,
+    }
+}
+
+/// Converts an arena-backed `IndexedAttributeValue` into an owned
+/// `AttributeValue`, for materializing `Set` elements -- mirrors
+/// `bytecode_vm`'s helper of the same shape.
+fn indexed_to_attribute_value(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> AttributeValue {
+    match v {
+        IndexedAttributeValue::String(s) => AttributeValue::String(s.clone()),
+        IndexedAttributeValue::Float(f) => AttributeValue::Float(*f),
+        IndexedAttributeValue::Integer(i) => AttributeValue::Integer(*i),
+        IndexedAttributeValue::Bool(b) => AttributeValue::Bool(*b),
+        IndexedAttributeValue::IpAddr(ip) => AttributeValue::IpAddr(*ip),
+        IndexedAttributeValue::IpNetwork(net) => AttributeValue::IpNetwork(net.clone()),
+        IndexedAttributeValue::Timestamp(t) => AttributeValue::Timestamp(*t),
+        IndexedAttributeValue::EntityRef(u) => AttributeValue::EntityRef(*u),
+        IndexedAttributeValue::Set(set_ref) => AttributeValue::Set(
+            entities
+                .attribute_set_values(*set_ref)
+                .iter()
+                .map(|e| indexed_to_attribute_value(entities, e))
+                .collect(),
+        ),
+        IndexedAttributeValue::Object(obj_ref) => {
+            let mut attrs = Attributes::new();
+            for (name, value) in entities.attribute_pairs(*obj_ref) {
+                attrs.set(*name, indexed_to_attribute_value(entities, value));
+            }
+            AttributeValue::Object(attrs)
+        }
+    }
 }
 
 fn val_scalar_eq(a: &Val, b: &Val) -> bool {

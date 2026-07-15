@@ -75,6 +75,11 @@ impl AuthorizerEngine {
         Self { snapshot: Arc::new(snapshot), version: 0 }
     }
 
+    /// Read-only access to the underlying snapshot, e.g. for diagnostics.
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
     pub fn load(path: &Path) -> Result<Self, StartupError> {
         let bytes = fs::read(path)?;
         let packaged = PackagedSnapshot::deserialize(&bytes)?;
@@ -105,31 +110,30 @@ impl AuthorizerEngine {
         let action_policies = self.snapshot.get_policies_for_action(action_idx)
             .map_err(AuthorizerError::Snapshot)?;
 
-        let principal_policies = principal_entity.effective_principal_policies.as_ref();
-        let resource_policies = resource_entity.effective_resource_policies.as_ref();
+        // Both sides are small per-entity sets (a handful to tens of policy
+        // indices); merging them first and only testing the survivors
+        // against `action_policies` (which stays a RoaringBitmap -- it's
+        // dense enough within its index range to be the case where Roaring
+        // wins) is faster than two full RoaringBitmap ANDs. See task #3.
+        let principal_effective = self.snapshot.effective_principal_of(principal_idx);
+        let resource_effective = self.snapshot.effective_resource_of(resource_idx);
+        let effective_policies =
+            Snapshot::merge_and_filter_sorted(principal_effective, resource_effective, action_policies);
 
-        let effective_policies = match (principal_policies, resource_policies) {
-            (Some(p), Some(r)) => {
-                let mut eff = p & r;
-                eff &= action_policies;
-                eff
-            }
-            _ => RoaringBitmap::new(),
-        };
         let (unconditional_forbidding, conditional_forbidding, unconditional_permitting, conditional_permitting) =
             self.snapshot.split_policy_map_for_authorization(&effective_policies);
 
         if !unconditional_forbidding.is_empty() {
             return Ok(CheckResult {
                 decision: Decision::Deny,
-                reason_policy_indices: unconditional_forbidding.iter().collect(),
+                reason_policy_indices: unconditional_forbidding,
             });
         }
 
         if conditional_forbidding.is_empty() && !unconditional_permitting.is_empty() {
             return Ok(CheckResult {
                 decision: Decision::Permit,
-                reason_policy_indices: unconditional_permitting.iter().collect(),
+                reason_policy_indices: unconditional_permitting.clone(),
             });
         }
 
@@ -151,7 +155,7 @@ impl AuthorizerEngine {
         if !unconditional_permitting.is_empty() {
             return Ok(CheckResult {
                 decision: Decision::Permit,
-                reason_policy_indices: unconditional_permitting.iter().collect(),
+                reason_policy_indices: unconditional_permitting,
             });
         }
 
@@ -182,17 +186,13 @@ impl AuthorizerEngine {
         let fixed_entity = self.snapshot.get_entity(fixed_idx)
             .ok_or(AuthorizerError::EntityNotFound(fixed_idx))?;
         let fixed_policies = match candidate_side {
-            PolicySide::Resource => fixed_entity.effective_principal_policies.as_ref(),
-            PolicySide::Principal => fixed_entity.effective_resource_policies.as_ref(),
+            PolicySide::Resource => self.snapshot.effective_principal_of(fixed_idx),
+            PolicySide::Principal => self.snapshot.effective_resource_of(fixed_idx),
         };
         let action_policies = self.snapshot.get_policies_for_action(action_idx)
             .map_err(AuthorizerError::Snapshot)?;
 
-        let effective_policies = if let Some(fp) = fixed_policies {
-            fp & action_policies
-        } else {
-            RoaringBitmap::new()
-        };
+        let effective_policies = Snapshot::filter_sorted_by_mask(fixed_policies, action_policies);
         let (unconditional_forbidding, conditional_forbidding, unconditional_permitting, conditional_permitting) =
             self.snapshot.split_policy_map_for_authorization(&effective_policies);
 
@@ -246,10 +246,10 @@ impl AuthorizerEngine {
         &self,
         vm: &mut BytecodeVM,
         ctx: &EvaluationContext<'_>,
-        policies: &RoaringBitmap,
+        policies: &[u32],
         forbid_semantics: bool,
     ) -> Result<Option<u32>, AuthorizerError> {
-        for policy_idx in policies.iter() {
+        for &policy_idx in policies {
             let policy = self.snapshot.get_policy(policy_idx)
                 .ok_or(AuthorizerError::PolicyNotFound(policy_idx))?;
             if let Some(condition) = &policy.conditions {
@@ -270,7 +270,7 @@ impl AuthorizerEngine {
         &'s self,
         fixed_entity: &'s IndexedEntity,
         candidates: RoaringBitmap,
-        get_candidate_policies: impl Fn(u32) -> Result<RoaringBitmap, AuthorizerError>,
+        get_candidate_policies: impl Fn(u32) -> Result<Vec<u32>, AuthorizerError>,
         candidate_side: PolicySide,
         forbid_semantics: bool,
     ) -> Result<RoaringBitmap, AuthorizerError> {
@@ -285,7 +285,7 @@ impl AuthorizerEngine {
                 PolicySide::Principal => (entity, fixed_entity),
             };
             let ctx = EvaluationContext::new(principal, resource, None, self.snapshot.as_ref());
-            for policy_idx in entity_policies.iter() {
+            for &policy_idx in &entity_policies {
                 let policy = self.snapshot.get_policy(policy_idx)
                     .ok_or(AuthorizerError::PolicyNotFound(policy_idx))?;
                 if let Some(condition) = &policy.conditions {

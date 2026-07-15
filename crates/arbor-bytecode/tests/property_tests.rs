@@ -2,11 +2,12 @@ use arbor_bytecode::compiler::BytecodeCompiler;
 use arbor_bytecode::bytecode_vm::BytecodeVM;
 use arbor_bytecode::evaluate_ast;
 use arbor_types::{
-    AttributeNameId, AttributeValue, Attributes, Condition, ConditionResult,
-    EntityResolver, EntityTypeId, EvaluationContext, IndexedEntity, Operand, VariableRef, VariableScope,
+    flatten_attributes, AttributeNameId, AttributeValue, Attributes, Condition, ConditionResult,
+    EntityResolver, EntityTypeId, EvaluationContext, IndexedAttributeValue, IndexedEntity,
+    Operand, SortedSetRef, VariableRef, VariableScope,
 };
 use proptest::prelude::*;
-use roaring::RoaringBitmap;
+use std::collections::HashMap;
 use chrono::{Utc, TimeZone};
 use ordered_float::OrderedFloat;
 
@@ -14,17 +15,54 @@ use ordered_float::OrderedFloat;
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
-struct NoopResolver;
-impl EntityResolver for NoopResolver {
-    fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
+/// Each entity carries its own ancestors `Vec` alongside it (test-only;
+/// production uses a single shared arena on `Snapshot`). Attribute arenas
+/// (`pairs`/`values`) are shared across all entities registered with one
+/// `MapResolver`, matching how `Snapshot` shares one arena per field.
+struct MapResolver {
+    entities: HashMap<u32, (IndexedEntity, Vec<u32>)>,
+    pairs: Vec<(AttributeNameId, IndexedAttributeValue)>,
+    values: Vec<IndexedAttributeValue>,
+}
+impl MapResolver {
+    fn new() -> Self {
+        Self { entities: HashMap::new(), pairs: Vec::new(), values: Vec::new() }
+    }
+    fn insert(mut self, entity: IndexedEntity, ancestors: Vec<u32>) -> Self {
+        self.entities.insert(entity.idx, (entity, ancestors));
+        self
+    }
+    /// Flattens `attrs` into this resolver's shared arena and attaches the
+    /// resulting `SortedSetRef` to the already-inserted entity `idx`.
+    fn with_attributes(mut self, idx: u32, attrs: &Attributes) -> Self {
+        let range = flatten_attributes(attrs, &mut self.pairs, &mut self.values);
+        if let Some((entity, _)) = self.entities.get_mut(&idx) {
+            entity.attributes = range;
+        }
+        self
+    }
+}
+impl EntityResolver for MapResolver {
+    fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
+        self.entities.get(&index).map(|(e, _)| e)
+    }
+    fn ancestors_of(&self, index: u32) -> Option<&[u32]> {
+        self.entities.get(&index).map(|(_, a)| a.as_slice())
+    }
+    fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
+        &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+    }
+    fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
+        &self.values[range.offset as usize..(range.offset + range.len) as usize]
+    }
 }
 
 fn empty_entity(idx: u32) -> IndexedEntity {
     IndexedEntity {
         idx,
-        attributes: Attributes::new(),
+        attributes: SortedSetRef::EMPTY,
         entity_type: EntityTypeId::new(0),
-        ancestors: RoaringBitmap::new(),
+        ancestors: SortedSetRef::EMPTY,
         principal_of_policies: None,
         resource_of_policies: None,
         effective_principal_policies: None,
@@ -129,14 +167,22 @@ proptest! {
             Err(_) => return Ok(()), // Skip structurally invalid conditions
         };
 
-        let mut principal = empty_entity(1);
-        for (id, val) in p_attrs { principal.attributes.set(id, val); }
-        let mut resource = empty_entity(2);
-        for (id, val) in r_attrs { resource.attributes.set(id, val); }
+        let mut principal_attrs = Attributes::new();
+        for (id, val) in p_attrs { principal_attrs.set(id, val); }
+        let mut resource_attrs = Attributes::new();
+        for (id, val) in r_attrs { resource_attrs.set(id, val); }
         let mut context_attrs = Attributes::new();
         for (id, val) in c_attrs { context_attrs.set(id, val); }
 
-        let context = EvaluationContext::new(&principal, &resource, Some(&context_attrs), &NoopResolver);
+        let resolver = MapResolver::new()
+            .insert(empty_entity(1), vec![])
+            .insert(empty_entity(2), vec![])
+            .with_attributes(1, &principal_attrs)
+            .with_attributes(2, &resource_attrs);
+        let principal = resolver.get_entity(1).unwrap().clone();
+        let resource = resolver.get_entity(2).unwrap().clone();
+
+        let context = EvaluationContext::new(&principal, &resource, Some(&context_attrs), &resolver);
 
         let ast_result = evaluate_ast(&condition, &context);
         let bc_result  = BytecodeVM::new().evaluate(&compiled.instructions, &context);

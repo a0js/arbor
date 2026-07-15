@@ -40,18 +40,11 @@ fn main() {
     let mut resource_roaring: Vec<RoaringBitmap> = Vec::new();
     let mut resource_arr: Vec<Vec<u32>> = Vec::new();
 
-    for node in &snapshot.nodes {
-        if let IndexedNode::Entity(e) = node {
-            let p: Vec<u32> = e
-                .effective_principal_policies
-                .as_ref()
-                .map(|b| b.iter().collect())
-                .unwrap_or_default();
-            let r: Vec<u32> = e
-                .effective_resource_policies
-                .as_ref()
-                .map(|b| b.iter().collect())
-                .unwrap_or_default();
+    for (idx, node) in snapshot.nodes.iter().enumerate() {
+        if let IndexedNode::Entity(_) = node {
+            let idx = idx as u32;
+            let p: Vec<u32> = snapshot.effective_principal_of(idx).to_vec();
+            let r: Vec<u32> = snapshot.effective_resource_of(idx).to_vec();
             if !p.is_empty() {
                 principal_roaring.push(RoaringBitmap::from_sorted_iter(p.iter().copied()).unwrap());
                 principal_arr.push(p);

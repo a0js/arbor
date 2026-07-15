@@ -1,10 +1,10 @@
 use arbor_bytecode::compiler::BytecodeCompiler;
 use arbor_bytecode::bytecode_vm::BytecodeVM;
 use arbor_types::{
-    AttributeNameId, AttributeValue, Attributes, Condition, ConditionResult,
-    EntityResolver, EntityTypeId, EvaluationContext, IndexedEntity, Operand, VariableRef, VariableScope,
+    flatten_attributes, AttributeNameId, AttributeValue, Attributes, Condition, ConditionResult,
+    EntityResolver, EntityTypeId, EvaluationContext, IndexedAttributeValue, IndexedEntity,
+    Operand, SortedSetRef, VariableRef, VariableScope,
 };
-use roaring::RoaringBitmap;
 use chrono::{Utc, TimeZone};
 use std::net::IpAddr;
 use std::collections::HashMap;
@@ -17,28 +17,59 @@ use ordered_float::OrderedFloat;
 struct NoopResolver;
 impl EntityResolver for NoopResolver {
     fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
+    fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
+    fn attribute_pairs(&self, _: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] { &[] }
+    fn attribute_set_values(&self, _: SortedSetRef) -> &[IndexedAttributeValue] { &[] }
 }
 
-struct MapResolver(HashMap<u32, IndexedEntity>);
+/// Each entity carries its own ancestors `Vec` alongside it (test-only;
+/// production uses a single shared arena on `Snapshot`). Attribute arenas
+/// (`pairs`/`values`) are shared across all entities registered with one
+/// `MapResolver`, matching how `Snapshot` shares one arena per field.
+struct MapResolver {
+    entities: HashMap<u32, (IndexedEntity, Vec<u32>)>,
+    pairs: Vec<(AttributeNameId, IndexedAttributeValue)>,
+    values: Vec<IndexedAttributeValue>,
+}
 impl MapResolver {
-    fn new() -> Self { Self(HashMap::new()) }
-    fn insert(mut self, entity: IndexedEntity) -> Self {
-        self.0.insert(entity.idx, entity);
+    fn new() -> Self {
+        Self { entities: HashMap::new(), pairs: Vec::new(), values: Vec::new() }
+    }
+    fn insert(mut self, entity: IndexedEntity, ancestors: Vec<u32>) -> Self {
+        self.entities.insert(entity.idx, (entity, ancestors));
+        self
+    }
+    /// Flattens `attrs` into this resolver's shared arena and attaches the
+    /// resulting `SortedSetRef` to the already-inserted entity `idx`.
+    fn with_attributes(mut self, idx: u32, attrs: &Attributes) -> Self {
+        let range = flatten_attributes(attrs, &mut self.pairs, &mut self.values);
+        if let Some((entity, _)) = self.entities.get_mut(&idx) {
+            entity.attributes = range;
+        }
         self
     }
 }
 impl EntityResolver for MapResolver {
     fn get_entity(&self, index: u32) -> Option<&IndexedEntity> {
-        self.0.get(&index)
+        self.entities.get(&index).map(|(e, _)| e)
+    }
+    fn ancestors_of(&self, index: u32) -> Option<&[u32]> {
+        self.entities.get(&index).map(|(_, a)| a.as_slice())
+    }
+    fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
+        &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+    }
+    fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
+        &self.values[range.offset as usize..(range.offset + range.len) as usize]
     }
 }
 
 fn empty_entity_at(idx: u32) -> IndexedEntity {
     IndexedEntity {
         idx,
-        attributes: Attributes::new(),
+        attributes: SortedSetRef::EMPTY,
         entity_type: EntityTypeId::new(0),
-        ancestors: RoaringBitmap::new(),
+        ancestors: SortedSetRef::EMPTY,
         principal_of_policies: None,
         resource_of_policies: None,
         effective_principal_policies: None,
@@ -59,10 +90,12 @@ fn test_all_operand_types_integration() {
     let now = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let ip: IpAddr = "192.168.1.1".parse().unwrap();
 
-    let mut principal = empty_entity_at(1);
-    principal.attributes.set(float_attr,     AttributeValue::Float(OrderedFloat(1.5)));
-    principal.attributes.set(timestamp_attr, AttributeValue::Timestamp(now));
-    principal.attributes.set(ip_attr,        AttributeValue::IpAddr(ip));
+    let mut attrs = Attributes::new();
+    attrs.set(float_attr,     AttributeValue::Float(OrderedFloat(1.5)));
+    attrs.set(timestamp_attr, AttributeValue::Timestamp(now));
+    attrs.set(ip_attr,        AttributeValue::IpAddr(ip));
+    let resolver = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs);
+    let principal = resolver.get_entity(1).unwrap().clone();
 
     let condition = Condition::And(vec![
         Condition::Gt(
@@ -82,7 +115,7 @@ fn test_all_operand_types_integration() {
     let compiled = BytecodeCompiler::new().compile(&condition).expect("Compilation failed");
 
     let resource = empty_entity_at(2);
-    let context = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let context = EvaluationContext::new(&principal, &resource, None, &resolver);
     let mut vm = BytecodeVM::new();
 
     assert_eq!(vm.evaluate(&compiled.instructions, &context), ConditionResult::True);
@@ -120,25 +153,39 @@ fn test_complex_nested_logic_integration() {
 
     let compiled = BytecodeCompiler::new().compile(&condition).expect("Compilation failed");
 
-    let mut resource = empty_entity_at(2);
-    resource.attributes.set(public_attr, AttributeValue::Bool(false));
+    let mut resource_attrs = Attributes::new();
+    resource_attrs.set(public_attr, AttributeValue::Bool(false));
+    let resource_resolver = MapResolver::new().insert(empty_entity_at(2), vec![]).with_attributes(2, &resource_attrs);
+    let resource = resource_resolver.get_entity(2).unwrap().clone();
 
     // Not(young_or_locked AND public_or_admin) — age=25, !locked, role=user, !public → True
-    let mut principal = empty_entity_at(1);
-    principal.attributes.set(age_attr,    AttributeValue::Integer(25));
-    principal.attributes.set(locked_attr, AttributeValue::Bool(false));
-    principal.attributes.set(role_attr,   AttributeValue::String("user".to_string()));
-    let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let mut attrs1 = Attributes::new();
+    attrs1.set(age_attr,    AttributeValue::Integer(25));
+    attrs1.set(locked_attr, AttributeValue::Bool(false));
+    attrs1.set(role_attr,   AttributeValue::String("user".to_string()));
+    let resolver1 = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs1);
+    let principal1 = resolver1.get_entity(1).unwrap().clone();
+    let ctx = EvaluationContext::new(&principal1, &resource, None, &resolver1);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // locked=true, role=user, !public → still True (left And branch fails but right returns user)
-    principal.attributes.set(locked_attr, AttributeValue::Bool(true));
-    let ctx2 = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let mut attrs2 = Attributes::new();
+    attrs2.set(age_attr,    AttributeValue::Integer(25));
+    attrs2.set(locked_attr, AttributeValue::Bool(true));
+    attrs2.set(role_attr,   AttributeValue::String("user".to_string()));
+    let resolver2 = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs2);
+    let principal2 = resolver2.get_entity(1).unwrap().clone();
+    let ctx2 = EvaluationContext::new(&principal2, &resource, None, &resolver2);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::True);
 
     // locked=true, role=admin, !public → False
-    principal.attributes.set(role_attr, AttributeValue::String("admin".to_string()));
-    let ctx3 = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let mut attrs3 = Attributes::new();
+    attrs3.set(age_attr,    AttributeValue::Integer(25));
+    attrs3.set(locked_attr, AttributeValue::Bool(true));
+    attrs3.set(role_attr,   AttributeValue::String("admin".to_string()));
+    let resolver3 = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs3);
+    let principal3 = resolver3.get_entity(1).unwrap().clone();
+    let ctx3 = EvaluationContext::new(&principal3, &resource, None, &resolver3);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx3), ConditionResult::False);
 }
 
@@ -197,16 +244,18 @@ fn test_all_operators_integration() {
 
     let compiled = BytecodeCompiler::new().compile(&condition).expect("Compilation failed");
 
-    let mut principal = empty_entity_at(1);
-    principal.attributes.set(s_attr,   AttributeValue::String("prefixmidfix".to_string()));
-    principal.attributes.set(n_attr,   AttributeValue::Integer(50));
-    principal.attributes.set(set_attr, AttributeValue::Set(vec![
+    let mut attrs = Attributes::new();
+    attrs.set(s_attr,   AttributeValue::String("prefixmidfix".to_string()));
+    attrs.set(n_attr,   AttributeValue::Integer(50));
+    attrs.set(set_attr, AttributeValue::Set(vec![
         AttributeValue::Integer(49),
         AttributeValue::Integer(50),
     ]));
+    let resolver = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs);
+    let principal = resolver.get_entity(1).unwrap().clone();
 
     let resource = empty_entity_at(2);
-    let context = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let context = EvaluationContext::new(&principal, &resource, None, &resolver);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &context), ConditionResult::True);
 }
 
@@ -216,8 +265,8 @@ fn test_type_and_hierarchy_integration() {
     let principal_idx = 1u32;
 
     // group entity is self-inclusive (own idx in ancestors)
-    let mut group_entity = empty_entity_at(group_idx);
-    group_entity.ancestors.insert(group_idx);
+    let group_entity = empty_entity_at(group_idx);
+    let group_ancestors = vec![group_idx];
 
     let user_type = EntityTypeId::new(1);
     let resource  = empty_entity_at(2);
@@ -235,22 +284,22 @@ fn test_type_and_hierarchy_integration() {
     // 1. Correct type, in hierarchy → True
     let mut principal = empty_entity_at(principal_idx);
     principal.entity_type = user_type;
-    principal.ancestors.insert(group_idx);
+    let principal_ancestors = vec![group_idx];
 
     let resolver = MapResolver::new()
-        .insert(principal.clone())
-        .insert(group_entity.clone());
+        .insert(principal.clone(), principal_ancestors)
+        .insert(group_entity.clone(), group_ancestors.clone());
     let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // 2. Wrong entity type → False (IsType fails)
     let mut principal_wrong_type = empty_entity_at(principal_idx);
     principal_wrong_type.entity_type = EntityTypeId::new(2);
-    principal_wrong_type.ancestors.insert(group_idx);
+    let principal_wrong_type_ancestors = vec![group_idx];
 
     let resolver2 = MapResolver::new()
-        .insert(principal_wrong_type.clone())
-        .insert(group_entity.clone());
+        .insert(principal_wrong_type.clone(), principal_wrong_type_ancestors)
+        .insert(group_entity.clone(), group_ancestors.clone());
     let ctx2 = EvaluationContext::new(&principal_wrong_type, &resource, None, &resolver2);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::False);
 
@@ -260,8 +309,8 @@ fn test_type_and_hierarchy_integration() {
     // ancestors left empty — group_idx not present
 
     let resolver3 = MapResolver::new()
-        .insert(principal_not_in_group.clone())
-        .insert(group_entity.clone());
+        .insert(principal_not_in_group.clone(), vec![])
+        .insert(group_entity.clone(), group_ancestors);
     let ctx3 = EvaluationContext::new(&principal_not_in_group, &resource, None, &resolver3);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx3), ConditionResult::False);
 }
@@ -288,14 +337,18 @@ fn test_variable_lookup_integration() {
 
     let resource = empty_entity_at(2);
 
-    let mut principal = empty_entity_at(1);
-    principal.attributes.set(attr_id, AttributeValue::String("Alice".to_string()));
-    let ctx = EvaluationContext::new(&principal, &resource, None, &NoopResolver);
+    let mut attrs = Attributes::new();
+    attrs.set(attr_id, AttributeValue::String("Alice".to_string()));
+    let resolver = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs);
+    let principal = resolver.get_entity(1).unwrap().clone();
+    let ctx = EvaluationContext::new(&principal, &resource, None, &resolver);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
-    let mut principal_wrong = empty_entity_at(1);
-    principal_wrong.attributes.set(attr_id, AttributeValue::String("Bob".to_string()));
-    let ctx_wrong = EvaluationContext::new(&principal_wrong, &resource, None, &NoopResolver);
+    let mut attrs_wrong = Attributes::new();
+    attrs_wrong.set(attr_id, AttributeValue::String("Bob".to_string()));
+    let resolver_wrong = MapResolver::new().insert(empty_entity_at(1), vec![]).with_attributes(1, &attrs_wrong);
+    let principal_wrong = resolver_wrong.get_entity(1).unwrap().clone();
+    let ctx_wrong = EvaluationContext::new(&principal_wrong, &resource, None, &resolver_wrong);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx_wrong), ConditionResult::False);
 }
 
@@ -322,12 +375,11 @@ fn test_in_hierarchy_attr_integration() {
     let groups_attr     = AttributeNameId::new(10);
     let resource        = empty_entity_at(2);
 
-    let mut admin_group = empty_entity_at(admin_group_idx);
-    admin_group.ancestors.insert(admin_group_idx);
+    let admin_group = empty_entity_at(admin_group_idx);
+    let admin_group_ancestors = vec![admin_group_idx];
 
-    let mut sub_group = empty_entity_at(sub_group_idx);
-    sub_group.ancestors.insert(admin_group_idx);
-    sub_group.ancestors.insert(sub_group_idx);
+    let sub_group = empty_entity_at(sub_group_idx);
+    let sub_group_ancestors = vec![admin_group_idx, sub_group_idx];
 
     // Condition: entity referenced by principal.groups_attr is in admin_group's hierarchy
     let condition = Condition::InHierarchy(
@@ -337,18 +389,25 @@ fn test_in_hierarchy_attr_integration() {
     let compiled = BytecodeCompiler::new().compile(&condition).expect("Compilation failed");
 
     // 1. principal.groups_attr = admin_group directly → True
-    let mut principal_direct = empty_entity_at(1);
-    principal_direct.attributes.set(groups_attr, AttributeValue::EntityRef(admin_group_idx));
-    let resolver = MapResolver::new().insert(admin_group.clone());
+    let mut attrs_direct = Attributes::new();
+    attrs_direct.set(groups_attr, AttributeValue::EntityRef(admin_group_idx));
+    let resolver = MapResolver::new()
+        .insert(empty_entity_at(1), vec![])
+        .insert(admin_group.clone(), admin_group_ancestors.clone())
+        .with_attributes(1, &attrs_direct);
+    let principal_direct = resolver.get_entity(1).unwrap().clone();
     let ctx = EvaluationContext::new(&principal_direct, &resource, None, &resolver);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx), ConditionResult::True);
 
     // 2. principal.groups_attr = sub_group, which has admin_group as ancestor → True (transitive)
-    let mut principal_nested = empty_entity_at(1);
-    principal_nested.attributes.set(groups_attr, AttributeValue::EntityRef(sub_group_idx));
+    let mut attrs_nested = Attributes::new();
+    attrs_nested.set(groups_attr, AttributeValue::EntityRef(sub_group_idx));
     let resolver2 = MapResolver::new()
-        .insert(admin_group.clone())
-        .insert(sub_group.clone());
+        .insert(empty_entity_at(1), vec![])
+        .insert(admin_group.clone(), admin_group_ancestors)
+        .insert(sub_group.clone(), sub_group_ancestors)
+        .with_attributes(1, &attrs_nested);
+    let principal_nested = resolver2.get_entity(1).unwrap().clone();
     let ctx2 = EvaluationContext::new(&principal_nested, &resource, None, &resolver2);
     assert_eq!(BytecodeVM::new().evaluate(&compiled.instructions, &ctx2), ConditionResult::True);
 }
