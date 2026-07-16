@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 bincode = "1"
 lz4_flex = "0.11"
 thiserror = "2"
+rkyv = { version = "0.8", features = ["uuid-1", "pointer_width_64"] }
+self_cell = "1"

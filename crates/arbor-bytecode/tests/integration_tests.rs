@@ -1,9 +1,9 @@
 use arbor_bytecode::compiler::BytecodeCompiler;
 use arbor_bytecode::bytecode_vm::BytecodeVM;
 use arbor_types::{
-    flatten_attributes, AttributeNameId, AttributeValue, Attributes, Condition, ConditionResult,
-    EntityResolver, EntityTypeId, EvaluationContext, IndexedAttributeValue, IndexedEntity,
-    Operand, SortedSetRef, VariableRef, VariableScope,
+    flatten_attributes, AttributeNameId, AttributeValue, AttributeValueView, Attributes, Condition,
+    ConditionResult, EntityResolver, EntityTypeId, EvaluationContext, IndexedAttributeValue,
+    IndexedEntity, Operand, SortedSetRef, VariableRef, VariableScope,
 };
 use chrono::{Utc, TimeZone};
 use std::net::IpAddr;
@@ -14,12 +14,44 @@ use ordered_float::OrderedFloat;
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
+/// Binary-searches into `arena` (the full shared arena -- `Object`'s
+/// `SortedSetRef` offsets are absolute into it) starting at `base`, then
+/// follows `Object` hops -- mirrors `Snapshot`'s real `resolve_attribute_path`.
+fn resolve_path_in<'a>(
+    arena: &'a [(AttributeNameId, IndexedAttributeValue)],
+    base: SortedSetRef,
+    path: &[AttributeNameId],
+) -> Option<AttributeValueView<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    let pairs = &arena[base.offset as usize..(base.offset + base.len) as usize];
+    let mut current = pairs
+        .binary_search_by_key(&path[0], |(k, _)| *k)
+        .ok()
+        .map(|i| &pairs[i].1)?;
+    for &name in &path[1..] {
+        match current {
+            IndexedAttributeValue::Object(nested) => {
+                let nested_pairs = &arena[nested.offset as usize..(nested.offset + nested.len) as usize];
+                current = nested_pairs
+                    .binary_search_by_key(&name, |(k, _)| *k)
+                    .ok()
+                    .map(|i| &nested_pairs[i].1)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current.as_view())
+}
+
 struct NoopResolver;
 impl EntityResolver for NoopResolver {
     fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
     fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
-    fn attribute_pairs(&self, _: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] { &[] }
-    fn attribute_set_values(&self, _: SortedSetRef) -> &[IndexedAttributeValue] { &[] }
+    fn resolve_attribute_path(&self, _: SortedSetRef, _: &[AttributeNameId]) -> Option<AttributeValueView<'_>> { None }
+    fn attribute_set_values(&self, _: SortedSetRef) -> Vec<AttributeValueView<'_>> { Vec::new() }
+    fn attribute_pairs_view(&self, _: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)> { Vec::new() }
 }
 
 /// Each entity carries its own ancestors `Vec` alongside it (test-only;
@@ -56,11 +88,20 @@ impl EntityResolver for MapResolver {
     fn ancestors_of(&self, index: u32) -> Option<&[u32]> {
         self.entities.get(&index).map(|(_, a)| a.as_slice())
     }
-    fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
-        &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+    fn resolve_attribute_path(&self, base: SortedSetRef, path: &[AttributeNameId]) -> Option<AttributeValueView<'_>> {
+        resolve_path_in(&self.pairs, base, path)
     }
-    fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
-        &self.values[range.offset as usize..(range.offset + range.len) as usize]
+    fn attribute_set_values(&self, range: SortedSetRef) -> Vec<AttributeValueView<'_>> {
+        self.values[range.offset as usize..(range.offset + range.len) as usize]
+            .iter()
+            .map(|v| v.as_view())
+            .collect()
+    }
+    fn attribute_pairs_view(&self, range: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)> {
+        self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+            .iter()
+            .map(|(k, v)| (*k, v.as_view()))
+            .collect()
     }
 }
 

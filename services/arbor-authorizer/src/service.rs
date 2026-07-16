@@ -28,23 +28,31 @@ pub struct AuthorizerService {
 }
 
 impl AuthorizerService {
+    /// Loads a snapshot written by `IndexerService::rebuild_snapshot`
+    /// (the rkyv+lz4 pipeline).
     pub fn load(path: &Path) -> Result<Self, StartupError> {
-        Ok(Self { engine: Arc::new(AuthorizerEngine::load(path)?) })
+        Ok(Self { engine: Arc::new(AuthorizerEngine::load_rkyv(path)?) })
+    }
+
+    /// Read-only access to the underlying engine, e.g. for diagnostics or
+    /// embedding this service outside its own gRPC handlers.
+    pub fn engine(&self) -> &AuthorizerEngine {
+        &self.engine
     }
 
     fn resolve_uuid(&self, s: &str, field: &'static str) -> Result<u32, Status> {
         let uuid = Uuid::from_str(s)
             .map_err(|_| Status::invalid_argument(format!("invalid {field}: not a UUID")))?;
-        self.engine.snapshot.uuid_to_index.get(&uuid).copied()
+        self.engine.snapshot().uuid_to_index(&uuid)
             .ok_or_else(|| Status::not_found(format!("{field} not found")))
     }
 
     fn indices_to_uuid_strings(&self, indices: &[u32]) -> Vec<String> {
         indices.iter()
             .filter_map(|&i| {
-                let uuid = self.engine.snapshot.index_to_uuid.get(i as usize)?.as_ref();
+                let uuid = self.engine.snapshot().index_to_uuid(i);
                 if uuid.is_none() {
-                    tracing::warn!(index = i, "index has no UUID — snapshot may be corrupt");
+                    tracing::warn!(index = i, "index has no UUID — snapshot may be corrupt or index out of range");
                 }
                 uuid
             })
@@ -144,7 +152,7 @@ impl Arbor for AuthorizerService {
         let req = request.into_inner();
         let principal_idx = self.resolve_uuid(&req.principal_id, "principal_id")?;
         let action_idx    = self.resolve_uuid(&req.action_id, "action_id")?;
-        let resource_type = self.engine.snapshot.get_entity_type_id_by_name(&req.entity_type_id)
+        let resource_type = self.engine.snapshot().get_entity_type_id_by_name(&req.entity_type_id)
             .ok_or_else(|| Status::invalid_argument(
                 format!("unknown entity_type_id: {:?}", req.entity_type_id)
             ))?;
@@ -166,7 +174,7 @@ impl Arbor for AuthorizerService {
         let req = request.into_inner();
         let resource_idx = self.resolve_uuid(&req.resource_id, "principal_id")?;
         let action_idx = self.resolve_uuid(&req.action_id, "action_id")?;
-        let principal_type = self.engine.snapshot.get_entity_type_id_by_name(&req.entity_type_id)
+        let principal_type = self.engine.snapshot().get_entity_type_id_by_name(&req.entity_type_id)
             .ok_or_else(|| Status::invalid_argument(
                 format!("unknown entity_type_id: {:?}", req.entity_type_id)
             ))?;

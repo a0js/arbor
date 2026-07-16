@@ -5,6 +5,8 @@ use std::hash::Hash;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use crate::rkyv_with::RoaringAsBytes;
 
 /// Simplified entity descriptor for ingestion; uses a human-readable type name
 /// instead of a pre-resolved `EntityTypeId`.
@@ -83,6 +85,7 @@ impl Entity {
 /// Roaring's container machinery is pure allocation overhead with no
 /// compression benefit. See `ancestors_arena` on `Snapshot`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct SortedSetRef {
     pub offset: u32,
     pub len: u32,
@@ -97,6 +100,7 @@ impl SortedSetRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct IndexedEntity {
     pub idx: u32,
     /// The entity's own attribute set -- a `SortedSetRef` into
@@ -116,13 +120,18 @@ pub struct IndexedEntity {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct IndexedEntityType {
+    #[rkyv(with = RoaringAsBytes)]
     pub nodes_of_type: RoaringBitmap,
+    #[rkyv(with = RoaringAsBytes)]
     pub policies_targeting_principals_of_type: RoaringBitmap,
+    #[rkyv(with = RoaringAsBytes)]
     pub policies_targeting_resources_of_type: RoaringBitmap,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum IndexedNode {
     Entity(IndexedEntity),
     /// Boxed because `IndexedPolicy` (144 bytes -- several inline

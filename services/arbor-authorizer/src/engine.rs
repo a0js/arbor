@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::{fs, io};
 use std::ops::Sub;
 use arbor_bytecode::BytecodeVM;
-use arbor_index_snapshot::{PackagedSnapshot, PolicySide, SerializationError, Snapshot};
+use arbor_index_snapshot::{PolicySide, RkyvPackagedSnapshot, RkyvSnapshot, SerializationError, Snapshot, SnapshotOps};
 use arbor_types::{ArborError, ConditionResult, EvaluationContext, EvaluationError, EntityTypeId, IndexedEntity};
 use roaring::RoaringBitmap;
 
@@ -63,7 +63,7 @@ pub struct ListEntitiesResult {
 // ---------------------------------------------------------------------------
 
 pub struct AuthorizerEngine {
-    pub(crate) snapshot: Arc<Snapshot>,
+    pub(crate) snapshot: Arc<dyn SnapshotOps + Send + Sync>,
     pub(crate) version: u64,
 }
 
@@ -76,22 +76,24 @@ impl AuthorizerEngine {
     }
 
     /// Read-only access to the underlying snapshot, e.g. for diagnostics.
-    pub fn snapshot(&self) -> &Snapshot {
-        &self.snapshot
+    pub fn snapshot(&self) -> &dyn SnapshotOps {
+        self.snapshot.as_ref()
     }
 
-    pub fn load(path: &Path) -> Result<Self, StartupError> {
+    /// Loads a snapshot written by the rkyv+lz4 pipeline
+    /// (`RkyvPackagedSnapshot`/`IndexerService::rebuild_snapshot`).
+    pub fn load_rkyv(path: &Path) -> Result<Self, StartupError> {
         let bytes = fs::read(path)?;
-        let packaged = PackagedSnapshot::deserialize(&bytes)?;
+        let packaged = RkyvPackagedSnapshot::deserialize(&bytes)?;
         let version = packaged.version;
         let metadata = packaged.metadata.clone();
-        let snapshot = packaged.into_snapshot()?;
+        let snapshot = RkyvSnapshot::from_compressed_bytes(packaged.into_compressed_data())?;
         tracing::info!(
             version,
             entity_count = metadata.entity_count,
             policy_count = metadata.policy_count,
             action_count = metadata.action_count,
-            "snapshot loaded"
+            "snapshot loaded (rkyv)"
         );
         Ok(Self { snapshot: Arc::new(snapshot), version })
     }
@@ -141,7 +143,7 @@ impl AuthorizerEngine {
             principal_entity,
             resource_entity,
             None,
-            self.snapshot.as_ref(),
+            self.snapshot.as_entity_resolver(),
         );
         let mut vm = BytecodeVM::new();
 
@@ -284,7 +286,7 @@ impl AuthorizerEngine {
                 PolicySide::Resource => (fixed_entity, entity),
                 PolicySide::Principal => (entity, fixed_entity),
             };
-            let ctx = EvaluationContext::new(principal, resource, None, self.snapshot.as_ref());
+            let ctx = EvaluationContext::new(principal, resource, None, self.snapshot.as_entity_resolver());
             for &policy_idx in &entity_policies {
                 let policy = self.snapshot.get_policy(policy_idx)
                     .ok_or(AuthorizerError::PolicyNotFound(policy_idx))?;

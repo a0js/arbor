@@ -17,9 +17,11 @@ uuid = { version = "1.18.1", features = ["v4", "v5"] }
 roaring = "0.11.2"
 libc = "0.2"
 rapidhash = "4.1.1"
-bincode = "1"
 lz4_flex = "0.11"
-rkyv = "0.8"
+rkyv = { version = "0.8", features = ["uuid-1", "pointer_width_64"] }
+chrono = "0.4.42"
+ipnet = "2.11.0"
+ordered-float = "5.1.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::conditions::{Condition, VariableRef};
 use crate::ids::EntityTypeId;
 use uuid::Uuid;
@@ -35,6 +36,7 @@ impl PolicyTarget {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum IndexedPolicyTarget {
     Entity(u32),
     EntityWithDescendants(u32),
@@ -91,6 +93,7 @@ impl Policy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct IndexedPolicy {
     pub idx: u32,
     pub principal_target: IndexedPolicyTarget,

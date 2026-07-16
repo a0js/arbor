@@ -21,8 +21,8 @@
 //! authorization bypass for conditions like `permit if principal.tier != "restricted"`.
 
 use arbor_types::{
-    resolve_nested_attribute, Attributes, AttributeValue, ConditionResult, EntityResolver,
-    EntityTypeId, EvaluationContext, EvaluationError, IndexedAttributeValue, OpCode,
+    Attributes, AttributeValue, AttributeValueView, ConditionResult, EntityResolver,
+    EntityTypeId, EvaluationContext, EvaluationError, OpCode,
     ResolvedEntityIndex, VariableRef, VariableScope,
 };
 use chrono::{DateTime, Utc};
@@ -283,8 +283,8 @@ impl BytecodeVM {
                     VariableScope::Resource => ctx.resource.attributes,
                     VariableScope::Context => unreachable!(),
                 };
-                let value = resolve_nested_attribute(ctx.entities, base, &var_ref.path)?;
-                Some(Self::indexed_attribute_value_to_stack(ctx.entities, value))
+                let value = ctx.entities.resolve_attribute_path(base, &var_ref.path)?;
+                Some(Self::attribute_value_view_to_stack(ctx.entities, value))
             }
         }
     }
@@ -305,55 +305,55 @@ impl BytecodeVM {
         }
     }
 
-    fn indexed_attribute_value_to_stack(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> StackValue {
+    fn attribute_value_view_to_stack(entities: &dyn EntityResolver, v: AttributeValueView<'_>) -> StackValue {
         match v {
-            IndexedAttributeValue::String(s) => StackValue::String(s.clone()),
-            IndexedAttributeValue::Float(f) => StackValue::Float(*f),
-            IndexedAttributeValue::Integer(i) => StackValue::Integer(*i),
-            IndexedAttributeValue::Bool(b) => StackValue::Bool(*b),
-            IndexedAttributeValue::IpAddr(ip) => StackValue::IpAddr(*ip),
-            IndexedAttributeValue::IpNetwork(net) => StackValue::IpNetwork(*net),
-            IndexedAttributeValue::Timestamp(t) => StackValue::Timestamp(*t),
-            IndexedAttributeValue::EntityRef(u) => StackValue::EntityRef(*u),
-            IndexedAttributeValue::Set(set_ref) => StackValue::Set(
+            AttributeValueView::String(s) => StackValue::String(s.to_string()),
+            AttributeValueView::Float(f) => StackValue::Float(OrderedFloat(f)),
+            AttributeValueView::Integer(i) => StackValue::Integer(i),
+            AttributeValueView::Bool(b) => StackValue::Bool(b),
+            AttributeValueView::IpAddr(ip) => StackValue::IpAddr(ip),
+            AttributeValueView::IpNetwork(net) => StackValue::IpNetwork(net),
+            AttributeValueView::Timestamp(t) => StackValue::Timestamp(t),
+            AttributeValueView::EntityRef(u) => StackValue::EntityRef(u),
+            AttributeValueView::Set(set_ref) => StackValue::Set(
                 entities
-                    .attribute_set_values(*set_ref)
-                    .iter()
-                    .map(|e| Self::indexed_to_attribute_value(entities, e))
+                    .attribute_set_values(set_ref)
+                    .into_iter()
+                    .map(|e| Self::attribute_value_view_to_owned(entities, e))
                     .collect(),
             ),
             // Objects cannot be directly compared; treat as Missing.
-            IndexedAttributeValue::Object(_) => StackValue::Missing,
+            AttributeValueView::Object(_) => StackValue::Missing,
         }
     }
 
-    /// Converts an arena-backed `IndexedAttributeValue` into an owned
+    /// Converts a borrowed `AttributeValueView` into an owned
     /// `AttributeValue` -- needed only to materialize `Set` elements onto
     /// `StackValue::Set(Vec<AttributeValue>)`, which stays the pre-arena type
     /// since `Set`/`ContainsAll`/`ContainsAny` are unaffected by this change.
     /// Recurses through `entities` for the (rare) case of a nested
     /// `Object`/`Set` inside a `Set`.
-    fn indexed_to_attribute_value(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> AttributeValue {
+    fn attribute_value_view_to_owned(entities: &dyn EntityResolver, v: AttributeValueView<'_>) -> AttributeValue {
         match v {
-            IndexedAttributeValue::String(s) => AttributeValue::String(s.clone()),
-            IndexedAttributeValue::Float(f) => AttributeValue::Float(*f),
-            IndexedAttributeValue::Integer(i) => AttributeValue::Integer(*i),
-            IndexedAttributeValue::Bool(b) => AttributeValue::Bool(*b),
-            IndexedAttributeValue::IpAddr(ip) => AttributeValue::IpAddr(*ip),
-            IndexedAttributeValue::IpNetwork(net) => AttributeValue::IpNetwork(net.clone()),
-            IndexedAttributeValue::Timestamp(t) => AttributeValue::Timestamp(*t),
-            IndexedAttributeValue::EntityRef(u) => AttributeValue::EntityRef(*u),
-            IndexedAttributeValue::Set(set_ref) => AttributeValue::Set(
+            AttributeValueView::String(s) => AttributeValue::String(s.to_string()),
+            AttributeValueView::Float(f) => AttributeValue::Float(OrderedFloat(f)),
+            AttributeValueView::Integer(i) => AttributeValue::Integer(i),
+            AttributeValueView::Bool(b) => AttributeValue::Bool(b),
+            AttributeValueView::IpAddr(ip) => AttributeValue::IpAddr(ip),
+            AttributeValueView::IpNetwork(net) => AttributeValue::IpNetwork(net),
+            AttributeValueView::Timestamp(t) => AttributeValue::Timestamp(t),
+            AttributeValueView::EntityRef(u) => AttributeValue::EntityRef(u),
+            AttributeValueView::Set(set_ref) => AttributeValue::Set(
                 entities
-                    .attribute_set_values(*set_ref)
-                    .iter()
-                    .map(|e| Self::indexed_to_attribute_value(entities, e))
+                    .attribute_set_values(set_ref)
+                    .into_iter()
+                    .map(|e| Self::attribute_value_view_to_owned(entities, e))
                     .collect(),
             ),
-            IndexedAttributeValue::Object(obj_ref) => {
+            AttributeValueView::Object(obj_ref) => {
                 let mut attrs = Attributes::new();
-                for (name, value) in entities.attribute_pairs(*obj_ref) {
-                    attrs.set(*name, Self::indexed_to_attribute_value(entities, value));
+                for (name, value) in entities.attribute_pairs_view(obj_ref) {
+                    attrs.set(name, Self::attribute_value_view_to_owned(entities, value));
                 }
                 AttributeValue::Object(attrs)
             }
@@ -886,10 +886,43 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use arbor_types::{
-        flatten_attributes, AttributeNameId, AttributeValue, Attributes, EntityResolver,
-        EntityTypeId, IndexedAttributeValue, IndexedEntity, SortedSetRef, VariableRef,
-        VariableScope,
+        flatten_attributes, AttributeNameId, AttributeValue, AttributeValueView, Attributes,
+        EntityResolver, EntityTypeId, IndexedAttributeValue, IndexedEntity, SortedSetRef,
+        VariableRef, VariableScope,
     };
+
+    /// Shared by the test resolvers below: binary-searches into `arena`
+    /// (the full shared arena -- `Object`'s `SortedSetRef` offsets are
+    /// absolute into it, so a pre-sliced window would misindex on the
+    /// second hop) starting at `base`, then follows `Object` hops the same
+    /// way `Snapshot`'s real `resolve_attribute_path` does.
+    fn resolve_path_in<'a>(
+        arena: &'a [(AttributeNameId, IndexedAttributeValue)],
+        base: SortedSetRef,
+        path: &[AttributeNameId],
+    ) -> Option<AttributeValueView<'a>> {
+        if path.is_empty() {
+            return None;
+        }
+        let pairs = &arena[base.offset as usize..(base.offset + base.len) as usize];
+        let mut current = pairs
+            .binary_search_by_key(&path[0], |(k, _)| *k)
+            .ok()
+            .map(|i| &pairs[i].1)?;
+        for &name in &path[1..] {
+            match current {
+                IndexedAttributeValue::Object(nested) => {
+                    let nested_pairs = &arena[nested.offset as usize..(nested.offset + nested.len) as usize];
+                    current = nested_pairs
+                        .binary_search_by_key(&name, |(k, _)| *k)
+                        .ok()
+                        .map(|i| &nested_pairs[i].1)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(current.as_view())
+    }
 
     // ── Test infrastructure ───────────────────────────────────────────────────
 
@@ -902,8 +935,9 @@ mod tests {
     impl EntityResolver for NoopResolver {
         fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
         fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
-        fn attribute_pairs(&self, _: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] { &[] }
-        fn attribute_set_values(&self, _: SortedSetRef) -> &[IndexedAttributeValue] { &[] }
+        fn resolve_attribute_path(&self, _: SortedSetRef, _: &[AttributeNameId]) -> Option<AttributeValueView<'_>> { None }
+        fn attribute_set_values(&self, _: SortedSetRef) -> Vec<AttributeValueView<'_>> { Vec::new() }
+        fn attribute_pairs_view(&self, _: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)> { Vec::new() }
     }
 
     /// Minimal resolver for tests that only need attribute resolution (no
@@ -917,11 +951,20 @@ mod tests {
     impl EntityResolver for AttrResolver {
         fn get_entity(&self, _: u32) -> Option<&IndexedEntity> { None }
         fn ancestors_of(&self, _: u32) -> Option<&[u32]> { None }
-        fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
-            &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+        fn resolve_attribute_path(&self, base: SortedSetRef, path: &[AttributeNameId]) -> Option<AttributeValueView<'_>> {
+            resolve_path_in(&self.pairs, base, path)
         }
-        fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
-            &self.values[range.offset as usize..(range.offset + range.len) as usize]
+        fn attribute_set_values(&self, range: SortedSetRef) -> Vec<AttributeValueView<'_>> {
+            self.values[range.offset as usize..(range.offset + range.len) as usize]
+                .iter()
+                .map(|v| v.as_view())
+                .collect()
+        }
+        fn attribute_pairs_view(&self, range: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)> {
+            self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+                .iter()
+                .map(|(k, v)| (*k, v.as_view()))
+                .collect()
         }
     }
 
@@ -962,11 +1005,20 @@ mod tests {
         fn ancestors_of(&self, index: u32) -> Option<&[u32]> {
             self.entities.get(&index).map(|(_, a)| a.as_slice())
         }
-        fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)] {
-            &self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+        fn resolve_attribute_path(&self, base: SortedSetRef, path: &[AttributeNameId]) -> Option<AttributeValueView<'_>> {
+            resolve_path_in(&self.pairs, base, path)
         }
-        fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue] {
-            &self.values[range.offset as usize..(range.offset + range.len) as usize]
+        fn attribute_set_values(&self, range: SortedSetRef) -> Vec<AttributeValueView<'_>> {
+            self.values[range.offset as usize..(range.offset + range.len) as usize]
+                .iter()
+                .map(|v| v.as_view())
+                .collect()
+        }
+        fn attribute_pairs_view(&self, range: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)> {
+            self.pairs[range.offset as usize..(range.offset + range.len) as usize]
+                .iter()
+                .map(|(k, v)| (*k, v.as_view()))
+                .collect()
         }
     }
 

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::errors::ArborError;
 use crate::errors::ArborError::ConversionError;
 use crate::attributes::AttributeValue;
@@ -113,12 +114,14 @@ impl Condition {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct VariableRef {
     pub scope: VariableScope,
     pub path: Vec<AttributeNameId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, PartialOrd, Eq, Ord, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum VariableScope {
     Principal,
     Resource,

@@ -6,19 +6,37 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use crate::rkyv_with::{IpNetAsBits, OrderedFloatAsF64, TimestampMillis};
 
+// AttributeValue is genuinely self-referential (Set(Vec<Self>), and
+// Object(Attributes) where Attributes holds a BTreeMap<_, Self>) -- the
+// derive macro's default bound generation can't resolve that cycle (it's
+// in the derive's auto-generated where-clause, not the data layout, so
+// Box/with::AsBox indirection doesn't help). `omit_bounds` on the recursive
+// fields plus manually supplying the non-recursive bounds it would
+// otherwise have inferred is rkyv's documented answer for this shape (see
+// rkyv's own examples/json_like_schema.rs, which hits the identical error
+// for a JSON-value enum).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
 pub enum AttributeValue {
     String(String),
-    Float(OrderedFloat<f64>),
+    Float(#[rkyv(with = OrderedFloatAsF64)] OrderedFloat<f64>),
     Integer(i64),
     Bool(bool),
-    Timestamp(DateTime<Utc>),
+    Timestamp(#[rkyv(with = TimestampMillis)] DateTime<Utc>),
     IpAddr(IpAddr),
-    IpNetwork(IpNet),
+    IpNetwork(#[rkyv(with = IpNetAsBits)] IpNet),
     EntityRef(u32),          // Reference to another entity
-    Set(Vec<AttributeValue>), // Set of attribute values
-    Object(Attributes),       // Nested attributes object
+    Set(#[rkyv(omit_bounds)] Vec<AttributeValue>), // Set of attribute values
+    Object(#[rkyv(omit_bounds)] Attributes),       // Nested attributes object
 }
 
 /// The indexed/persisted counterpart of `AttributeValue`, used only by
@@ -34,21 +52,72 @@ pub enum AttributeValue {
 /// corresponding `names_arena` slots are unused placeholders, keeping the
 /// two arrays the same length without needing a named/unnamed split.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum IndexedAttributeValue {
     String(String),
-    Float(OrderedFloat<f64>),
+    Float(#[rkyv(with = OrderedFloatAsF64)] OrderedFloat<f64>),
     Integer(i64),
     Bool(bool),
-    Timestamp(DateTime<Utc>),
+    Timestamp(#[rkyv(with = TimestampMillis)] DateTime<Utc>),
     IpAddr(IpAddr),
-    IpNetwork(IpNet),
+    IpNetwork(#[rkyv(with = IpNetAsBits)] IpNet),
     EntityRef(u32),
     Set(SortedSetRef),
     Object(SortedSetRef),
 }
 
+impl IndexedAttributeValue {
+    /// Borrows into an [`crate::AttributeValueView`] -- `.as_str()` on the
+    /// owned `String`, zero allocation, same as the archived counterpart's
+    /// `ArchivedString` borrow.
+    pub fn as_view(&self) -> crate::AttributeValueView<'_> {
+        use crate::AttributeValueView as V;
+        match self {
+            IndexedAttributeValue::String(s) => V::String(s.as_str()),
+            IndexedAttributeValue::Float(f) => V::Float(f.into_inner()),
+            IndexedAttributeValue::Integer(i) => V::Integer(*i),
+            IndexedAttributeValue::Bool(b) => V::Bool(*b),
+            IndexedAttributeValue::Timestamp(t) => V::Timestamp(*t),
+            IndexedAttributeValue::IpAddr(ip) => V::IpAddr(*ip),
+            IndexedAttributeValue::IpNetwork(net) => V::IpNetwork(*net),
+            IndexedAttributeValue::EntityRef(u) => V::EntityRef(*u),
+            IndexedAttributeValue::Set(r) => V::Set(*r),
+            IndexedAttributeValue::Object(r) => V::Object(*r),
+        }
+    }
+}
+
+impl ArchivedIndexedAttributeValue {
+    /// Zero-copy borrow into an [`crate::AttributeValueView`] straight off
+    /// the archive -- `String` borrows `ArchivedString`'s bytes directly, no
+    /// allocation. Mirrors `IndexedAttributeValue::as_view`.
+    pub fn as_view(&self) -> crate::AttributeValueView<'_> {
+        use crate::AttributeValueView as V;
+        match self {
+            ArchivedIndexedAttributeValue::String(s) => V::String(s.as_str()),
+            ArchivedIndexedAttributeValue::Float(f) => V::Float(f64::from(*f)),
+            ArchivedIndexedAttributeValue::Integer(i) => V::Integer(i64::from(*i)),
+            ArchivedIndexedAttributeValue::Bool(b) => V::Bool(*b),
+            ArchivedIndexedAttributeValue::Timestamp(millis) => V::Timestamp(
+                DateTime::from_timestamp_millis(i64::from(*millis))
+                    .expect("millis out of DateTime<Utc> range"),
+            ),
+            ArchivedIndexedAttributeValue::IpAddr(ip) => {
+                V::IpAddr(rkyv::deserialize::<IpAddr, rkyv::rancor::Error>(ip).expect("infallible IpAddr deserialize"))
+            }
+            ArchivedIndexedAttributeValue::IpNetwork(bits) => {
+                V::IpNetwork(crate::rkyv_with::ipnet_from_parts(bits.v6, bits.addr, bits.prefix_len))
+            }
+            ArchivedIndexedAttributeValue::EntityRef(u) => V::EntityRef(u32::from(*u)),
+            ArchivedIndexedAttributeValue::Set(r) => V::Set(SortedSetRef { offset: u32::from(r.offset), len: u32::from(r.len) }),
+            ArchivedIndexedAttributeValue::Object(r) => V::Object(SortedSetRef { offset: u32::from(r.offset), len: u32::from(r.len) }),
+        }
+    }
+}
+
 /// Attributes wrapper that provides efficient nested object support
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct Attributes {
     data: BTreeMap<AttributeNameId, AttributeValue>,
 }

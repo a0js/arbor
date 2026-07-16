@@ -8,6 +8,7 @@ mod conditions;
 mod entities;
 mod policies;
 mod evaluation;
+pub mod rkyv_with;
 
 pub use constants::*;
 pub use errors::*;

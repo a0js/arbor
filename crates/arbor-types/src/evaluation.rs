@@ -1,15 +1,40 @@
 //! Types for condition evaluation
 
+use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use crate::entities::{IndexedEntity, SortedSetRef};
-use crate::attributes::{Attributes, IndexedAttributeValue};
+use crate::attributes::Attributes;
 use crate::ids::AttributeNameId;
+
+/// Borrowed view over an attribute value, returned by [`EntityResolver`]
+/// instead of a reference to the owned `IndexedAttributeValue`/
+/// `ArchivedIndexedAttributeValue` directly -- one concrete enum both the
+/// in-memory `Snapshot` and the rkyv-backed reader can produce cheaply
+/// (`String(&str)` borrows either an owned `String` or a zero-copy
+/// `ArchivedString`, no allocation either way), keeping `EntityResolver`
+/// object-safe without materializing owned attribute data at load time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AttributeValueView<'a> {
+    String(&'a str),
+    Float(f64),
+    Integer(i64),
+    Bool(bool),
+    Timestamp(DateTime<Utc>),
+    IpAddr(IpAddr),
+    IpNetwork(IpNet),
+    EntityRef(u32),
+    Set(SortedSetRef),
+    Object(SortedSetRef),
+}
 
 /// Allows the bytecode VM to look up entities by their snapshot index.
 ///
-/// Implemented by `Snapshot` in `arbor-index-snapshot`. The trait lives in
-/// `arbor-types` to avoid a circular dependency (`arbor-index-snapshot` already
-/// depends on `arbor-types`).
+/// Implemented by `Snapshot` and the rkyv-backed reader in
+/// `arbor-index-snapshot`. The trait lives in `arbor-types` to avoid a
+/// circular dependency (`arbor-index-snapshot` already depends on
+/// `arbor-types`).
 pub trait EntityResolver {
     /// Look up an `IndexedEntity` by its snapshot index.
     fn get_entity(&self, index: u32) -> Option<&IndexedEntity>;
@@ -18,49 +43,26 @@ pub trait EntityResolver {
     /// sorted slice of ancestor indices. `None` if the entity doesn't exist.
     fn ancestors_of(&self, index: u32) -> Option<&[u32]>;
 
-    /// Resolve a `SortedSetRef` for an `IndexedEntity`'s own attributes or a
-    /// nested `IndexedAttributeValue::Object` into its `(name, value)` pairs,
-    /// sorted by name.
-    fn attribute_pairs(&self, range: SortedSetRef) -> &[(AttributeNameId, IndexedAttributeValue)];
+    /// Walks a nested attribute path starting from `base` (an entity's own
+    /// attributes, or a nested `Object`'s `SortedSetRef`), binary-searching
+    /// by name at each hop. Resolved internally per backing store since the
+    /// concrete `(name, value)` pair representation differs (owned vs.
+    /// archived), so the pair slice's concrete element type never has to
+    /// cross the trait boundary.
+    fn resolve_attribute_path(&self, base: SortedSetRef, path: &[AttributeNameId]) -> Option<AttributeValueView<'_>>;
 
     /// Resolve a `SortedSetRef` for an `IndexedAttributeValue::Set` into its
-    /// (unnamed) elements.
-    fn attribute_set_values(&self, range: SortedSetRef) -> &[IndexedAttributeValue];
-}
+    /// (unnamed) elements. Small, bounded by one Set attribute's element
+    /// count, and only paid when a condition actually reads a Set-typed
+    /// attribute during evaluation -- not a load-time cost.
+    fn attribute_set_values(&self, range: SortedSetRef) -> Vec<AttributeValueView<'_>>;
 
-/// Walks a nested attribute path starting from `base` (an entity's own
-/// attributes, or a nested `Object`'s `SortedSetRef`), resolving through
-/// `entities`'s shared attribute arena at each hop. Mirrors the old
-/// `Attributes::get_nested`, but for the arena-backed indexed representation.
-pub fn resolve_nested_attribute<'a>(
-    entities: &'a dyn EntityResolver,
-    base: SortedSetRef,
-    path: &[AttributeNameId],
-) -> Option<&'a IndexedAttributeValue> {
-    if path.is_empty() {
-        return None;
-    }
-
-    let pairs = entities.attribute_pairs(base);
-    let mut current = pairs
-        .binary_search_by_key(&path[0], |(k, _)| *k)
-        .ok()
-        .map(|i| &pairs[i].1)?;
-
-    for &name in &path[1..] {
-        match current {
-            IndexedAttributeValue::Object(nested) => {
-                let nested_pairs = entities.attribute_pairs(*nested);
-                current = nested_pairs
-                    .binary_search_by_key(&name, |(k, _)| *k)
-                    .ok()
-                    .map(|i| &nested_pairs[i].1)?;
-            }
-            _ => return None,
-        }
-    }
-
-    Some(current)
+    /// Resolve a `SortedSetRef` for an `IndexedAttributeValue::Object` into
+    /// all of its `(name, value)` pairs -- used to materialize a whole
+    /// nested object (e.g. an `Object` found inside a `Set`), as opposed to
+    /// `resolve_attribute_path`'s single named lookup. Same bounded,
+    /// pay-per-use cost as `attribute_set_values`.
+    fn attribute_pairs_view(&self, range: SortedSetRef) -> Vec<(AttributeNameId, AttributeValueView<'_>)>;
 }
 
 /// Result of evaluating a condition

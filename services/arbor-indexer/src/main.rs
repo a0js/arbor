@@ -1,10 +1,9 @@
 use std::env;
 use std::path::PathBuf;
 
-use service::IndexerService;
+use arbor_indexer::service::IndexerService;
 
 mod example_graph;
-mod service;
 
 #[tokio::main]
 async fn main() {

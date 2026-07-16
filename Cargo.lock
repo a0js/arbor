@@ -73,10 +73,12 @@ dependencies = [
  "arbor-index-snapshot",
  "arbor-indexer",
  "arbor-types",
- "bincode",
+ "chrono",
  "criterion",
+ "ipnet",
  "libc",
  "lz4_flex",
+ "ordered-float",
  "rapidhash",
  "rkyv",
  "roaring",
@@ -128,7 +130,9 @@ dependencies = [
  "bincode",
  "lz4_flex",
  "rapidhash",
+ "rkyv",
  "roaring",
+ "self_cell",
  "serde",
  "thiserror",
  "uuid",
@@ -166,6 +170,7 @@ dependencies = [
  "chrono",
  "ipnet",
  "ordered-float",
+ "rkyv",
  "roaring",
  "serde",
  "smallvec 2.0.0-alpha.12",
@@ -353,6 +358,7 @@ dependencies = [
  "ptr_meta",
  "rancor",
  "simdutf8",
+ "uuid",
 ]
 
 [[package]]
@@ -2242,6 +2248,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "self_cell"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 
 [[package]]
 name = "serde"

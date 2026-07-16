@@ -1,8 +1,6 @@
-use service::{AuthorizerService, ArborServer};
+use arbor_authorizer::service::{AuthorizerService, ArborServer};
 use tonic::transport::Server;
 
-mod engine;
-mod service;
 mod config;
 
 use config::{AuthorizerConfig, Transport};

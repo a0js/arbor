@@ -1,7 +1,7 @@
 #![cfg(any(test, feature = "test_utils"))]
 use arbor_types::{
-    resolve_nested_attribute, Attributes, AttributeValue, Condition, ConditionResult,
-    EntityResolver, EvaluationContext, EvaluationError, IndexedAttributeValue, Operand,
+    Attributes, AttributeValue, AttributeValueView, Condition, ConditionResult,
+    EntityResolver, EvaluationContext, EvaluationError, Operand,
     VariableRef, VariableScope,
 };
 use chrono::{DateTime, Utc};
@@ -397,57 +397,57 @@ fn resolve_variable(var_ref: &VariableRef, context: &EvaluationContext) -> Optio
                 VariableScope::Resource => context.resource.attributes,
                 VariableScope::Context => unreachable!(),
             };
-            let value = resolve_nested_attribute(context.entities, base, &var_ref.path)?;
-            Some(indexed_attribute_value_to_val(context.entities, value))
+            let value = context.entities.resolve_attribute_path(base, &var_ref.path)?;
+            Some(attribute_value_view_to_val(context.entities, value))
         }
     }
 }
 
-fn indexed_attribute_value_to_val(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> Val {
+fn attribute_value_view_to_val(entities: &dyn EntityResolver, v: AttributeValueView<'_>) -> Val {
     match v {
-        IndexedAttributeValue::String(s) => Val::String(s.clone()),
-        IndexedAttributeValue::Float(f) => Val::Float(*f),
-        IndexedAttributeValue::Integer(i) => Val::Integer(*i),
-        IndexedAttributeValue::Bool(b) => Val::Bool(*b),
-        IndexedAttributeValue::IpAddr(ip) => Val::IpAddr(*ip),
-        IndexedAttributeValue::IpNetwork(net) => Val::IpNetwork(*net),
-        IndexedAttributeValue::Timestamp(t) => Val::Timestamp(*t),
-        IndexedAttributeValue::EntityRef(u) => Val::EntityRef(*u),
-        IndexedAttributeValue::Set(set_ref) => Val::Set(
+        AttributeValueView::String(s) => Val::String(s.to_string()),
+        AttributeValueView::Float(f) => Val::Float(OrderedFloat(f)),
+        AttributeValueView::Integer(i) => Val::Integer(i),
+        AttributeValueView::Bool(b) => Val::Bool(b),
+        AttributeValueView::IpAddr(ip) => Val::IpAddr(ip),
+        AttributeValueView::IpNetwork(net) => Val::IpNetwork(net),
+        AttributeValueView::Timestamp(t) => Val::Timestamp(t),
+        AttributeValueView::EntityRef(u) => Val::EntityRef(u),
+        AttributeValueView::Set(set_ref) => Val::Set(
             entities
-                .attribute_set_values(*set_ref)
-                .iter()
-                .map(|e| indexed_to_attribute_value(entities, e))
+                .attribute_set_values(set_ref)
+                .into_iter()
+                .map(|e| attribute_value_view_to_owned(entities, e))
                 .collect(),
         ),
-        IndexedAttributeValue::Object(_) => Val::Missing,
+        AttributeValueView::Object(_) => Val::Missing,
     }
 }
 
-/// Converts an arena-backed `IndexedAttributeValue` into an owned
-/// `AttributeValue`, for materializing `Set` elements -- mirrors
-/// `bytecode_vm`'s helper of the same shape.
-fn indexed_to_attribute_value(entities: &dyn EntityResolver, v: &IndexedAttributeValue) -> AttributeValue {
+/// Converts a borrowed `AttributeValueView` into an owned `AttributeValue`,
+/// for materializing `Set` elements -- mirrors `bytecode_vm`'s helper of the
+/// same shape.
+fn attribute_value_view_to_owned(entities: &dyn EntityResolver, v: AttributeValueView<'_>) -> AttributeValue {
     match v {
-        IndexedAttributeValue::String(s) => AttributeValue::String(s.clone()),
-        IndexedAttributeValue::Float(f) => AttributeValue::Float(*f),
-        IndexedAttributeValue::Integer(i) => AttributeValue::Integer(*i),
-        IndexedAttributeValue::Bool(b) => AttributeValue::Bool(*b),
-        IndexedAttributeValue::IpAddr(ip) => AttributeValue::IpAddr(*ip),
-        IndexedAttributeValue::IpNetwork(net) => AttributeValue::IpNetwork(net.clone()),
-        IndexedAttributeValue::Timestamp(t) => AttributeValue::Timestamp(*t),
-        IndexedAttributeValue::EntityRef(u) => AttributeValue::EntityRef(*u),
-        IndexedAttributeValue::Set(set_ref) => AttributeValue::Set(
+        AttributeValueView::String(s) => AttributeValue::String(s.to_string()),
+        AttributeValueView::Float(f) => AttributeValue::Float(OrderedFloat(f)),
+        AttributeValueView::Integer(i) => AttributeValue::Integer(i),
+        AttributeValueView::Bool(b) => AttributeValue::Bool(b),
+        AttributeValueView::IpAddr(ip) => AttributeValue::IpAddr(ip),
+        AttributeValueView::IpNetwork(net) => AttributeValue::IpNetwork(net),
+        AttributeValueView::Timestamp(t) => AttributeValue::Timestamp(t),
+        AttributeValueView::EntityRef(u) => AttributeValue::EntityRef(u),
+        AttributeValueView::Set(set_ref) => AttributeValue::Set(
             entities
-                .attribute_set_values(*set_ref)
-                .iter()
-                .map(|e| indexed_to_attribute_value(entities, e))
+                .attribute_set_values(set_ref)
+                .into_iter()
+                .map(|e| attribute_value_view_to_owned(entities, e))
                 .collect(),
         ),
-        IndexedAttributeValue::Object(obj_ref) => {
+        AttributeValueView::Object(obj_ref) => {
             let mut attrs = Attributes::new();
-            for (name, value) in entities.attribute_pairs(*obj_ref) {
-                attrs.set(*name, indexed_to_attribute_value(entities, value));
+            for (name, value) in entities.attribute_pairs_view(obj_ref) {
+                attrs.set(name, attribute_value_view_to_owned(entities, value));
             }
             AttributeValue::Object(attrs)
         }

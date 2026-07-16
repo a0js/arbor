@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use arbor_graph_core::graph::Graph;
-use arbor_index_snapshot::PackagedSnapshot;
+use arbor_index_snapshot::RkyvPackagedSnapshot;
 use arbor_types::ArborResult;
 
-use arbor_indexer::snapshot_builder::SnapshotBuilder;
+use crate::snapshot_builder::SnapshotBuilder;
 
 /// The indexer service.
 ///
@@ -39,7 +39,7 @@ impl IndexerService {
 
         let entity_count = snapshot.nodes.len();
 
-        let packaged = PackagedSnapshot::from_snapshot(snapshot, self.generation, generation_ms)
+        let packaged = RkyvPackagedSnapshot::from_snapshot(snapshot, self.generation, generation_ms)
             .map_err(|e| arbor_types::ArborError::ConversionError(e.to_string()))?;
 
         let bytes = packaged.serialize()

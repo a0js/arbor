@@ -3,26 +3,30 @@ use std::net::IpAddr;
 use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::attributes::AttributeValue;
 use crate::conditions::{VariableRef, VariableScope};
 use crate::ids::EntityTypeId;
+use crate::rkyv_with::{IpNetAsBits, OrderedFloatAsF64, TimestampMillis};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum ResolvedEntityIndex {
     Variable(VariableRef),
     Direct(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum OpCode {
     // Stack manipulation
     PushInteger(i64),
-    PushFloat(OrderedFloat<f64>),
-    PushTimestamp(DateTime<Utc>),
+    PushFloat(#[rkyv(with = OrderedFloatAsF64)] OrderedFloat<f64>),
+    PushTimestamp(#[rkyv(with = TimestampMillis)] DateTime<Utc>),
     PushString(String),
     PushBool(bool),
     PushIpAddr(IpAddr),
-    PushIpNetwork(IpNet),
+    PushIpNetwork(#[rkyv(with = IpNetAsBits)] IpNet),
     PushEntityRef(u32),
     /// Push the value at the given attribute path onto the stack.
     /// Pushes StackValue::Missing if the path does not exist.
@@ -89,6 +93,7 @@ pub enum OpCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct CompiledCondition {
     pub instructions: Vec<OpCode>,
     pub dependencies: Vec<VariableRef>,
