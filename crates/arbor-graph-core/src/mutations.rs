@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, EntityInput, EntityTypeId, GraphError, Policy, PolicyTarget};
+use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, EntityInput, EntityTypeId, GraphError, Policy, PolicyInput, PolicyTarget, PolicyTargetInput};
 use roaring::RoaringBitmap;
 use crate::types::NodeType;
 
@@ -399,5 +399,35 @@ impl super::graph::Graph {
         let type_id = self.get_or_create_entity_type_id(&input.type_name);
         let entity = Entity::new(input.id, input.name, type_id, input.parents);
         self.upsert_entity(entity)
+    }
+
+    fn resolve_policy_target(&mut self, target: PolicyTargetInput) -> PolicyTarget {
+        match target {
+            PolicyTargetInput::Entity(id) => PolicyTarget::Entity(id),
+            PolicyTargetInput::EntityWithDescendants(id) => PolicyTarget::EntityWithDescendants(id),
+            PolicyTargetInput::EntityType(name) => {
+                PolicyTarget::EntityType(self.get_or_create_entity_type_id(&name))
+            }
+            PolicyTargetInput::All => PolicyTarget::All,
+        }
+    }
+
+    /// Upsert a policy described by a `PolicyInput`, resolving `EntityType` target
+    /// names to `EntityTypeId`s automatically (creating them if not yet registered).
+    pub fn upsert_policy_from_input(&mut self, input: PolicyInput) -> ArborResult<()> {
+        let principal = self.resolve_policy_target(input.principal);
+        let resource = self.resolve_policy_target(input.resource);
+        let policy = Policy::new(
+            input.id,
+            input.name,
+            None,
+            input.policy_type,
+            principal,
+            resource,
+            input.actions,
+            vec![],
+            None,
+        );
+        self.upsert_policy(policy)
     }
 }

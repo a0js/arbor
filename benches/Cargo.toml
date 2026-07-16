@@ -22,6 +22,7 @@ rkyv = { version = "0.8", features = ["uuid-1", "pointer_width_64"] }
 chrono = "0.4.42"
 ipnet = "2.11.0"
 ordered-float = "5.1.0"
+rand = "0.9"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

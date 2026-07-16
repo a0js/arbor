@@ -12,6 +12,7 @@ arbor-types = { path = "../../crates/arbor-types" }
 arbor-graph-core = { path = "../../crates/arbor-graph-core" }
 arbor-index-snapshot = { path = "../../crates/arbor-index-snapshot" }
 arbor-bytecode = { path = "../../crates/arbor-bytecode" }
+arbor-connectors = { path = "../../crates/arbor-connectors" }
 uuid = { version = "1.18.1", features = ["v4"] }
 roaring = "0.11.2"
 rapidhash = "4.1.1"

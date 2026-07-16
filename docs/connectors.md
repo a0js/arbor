@@ -7,9 +7,9 @@ Connectors are the data ingestion layer for the Arbor indexer. They read entitie
 Connectors are configured via two YAML files:
 
 - **`config/connectors.yaml`** — named connection definitions (credentials live here)
-- **`config/entity_types.yaml`** — entity type and policy queries that reference connectors by name
+- **`config/data_model.yaml`** — entity type and policy queries that reference connectors by name
 
-This split keeps credentials separate from data model config. `entity_types.yaml` can be committed to git freely; `connectors.yaml` should be gitignored or delivered via a secret manager in production.
+This split keeps credentials separate from data model config. `data_model.yaml` can be committed to git freely; `connectors.yaml` should be gitignored or delivered via a secret manager in production.
 
 ## Configuration
 
@@ -37,9 +37,9 @@ connectors:
 
 Passwords are never written to this file. Inject them via environment variables using double-underscore separators for nested keys (e.g. `ARBOR__CONNECTORS__HR_DB__PASSWORD=secret`). For local development, use `config/connectors.local.yaml` (gitignored) instead.
 
-### `config/entity_types.yaml`
+### `config/data_model.yaml`
 
-Defines entity type queries and policy queries. Each entry references a named connector and provides a SQL query with a fixed output column contract.
+Defines entity type queries and policy queries, under the `entity_types:` and `policies:` keys respectively. Each entry references a named connector and provides a SQL query with a fixed output column contract.
 
 ```yaml
 entity_types:
@@ -117,17 +117,50 @@ user: arbor
 
 ### `csv`
 
-Reads two CSV files — one for entities, one for policies. Useful for bootstrapping and offline testing without a live database.
+Reads entities and policies from CSV files. Useful for bootstrapping and offline testing without a live database, and for one-off imports from systems (HRIS exports, spreadsheets) whose CSVs won't have Arbor's field names as headers.
+
+`connectors.yaml` holds only the file location — the same split the `postgres` connector uses for credentials:
 
 ```yaml
-type: csv
-entities_file: /data/entities.csv
-policies_file: /data/policies.csv
+connectors:
+  employees_csv:
+    type: csv
+    file: employees.csv    # resolved relative to connectors.yaml's directory
+  policies_csv:
+    type: csv
+    file: policies.csv
 ```
 
-**CSV column contracts** mirror the SQL query contracts:
-- `entities.csv`: `id, name, type_name, parent_ids` (`parent_ids` is a semicolon-separated list of UUIDs)
-- `policies.csv`: `id, name, policy_type, principal_id, resource_id, actions` (`actions` is a semicolon-separated list of UUIDs)
+`data_model.yaml` is where the data model lives, same as for `postgres` — except instead of a SQL query whose `AS` aliases do the column mapping, a CSV connector declares an explicit `columns:` mapping from Arbor's logical fields to that file's actual header names:
+
+**One file per entity type.** Each `entity_types` entry names exactly one entity type and one connector, so a full dataset needs one entry (and typically one CSV) per type. Each row has **at most one parent** (`parent_id`, optional) — this matches how most external systems export hierarchy (a single `manager_id` column), not an arbitrary multi-parent DAG. If a real source needs multiple parents per entity (e.g. group membership on top of an org chart), model that as a separate policy rather than a second parent column.
+
+```yaml
+entity_types:
+  - name: Employee
+    connector: employees_csv
+    columns:
+      id: emp_id                 # required
+      name: full_name            # required
+      parent_id: manager_id      # optional; omit entirely for root-level entities
+
+policies:
+  - connector: policies_csv
+    columns:
+      id: policy_id
+      name: policy_name
+      policy_type: ptype                # "permit" | "forbid"
+      principal_type: principal_kind    # "entity" | "entity_with_descendants" | "entity_type" | "all"
+      principal_id: principal           # a UUID for entity/entity_with_descendants,
+                                         # a type name for entity_type, ignored for all
+      resource_type: resource_kind
+      resource_id: resource
+      actions: action_ids               # semicolon-separated list of action UUIDs
+```
+
+`entity_type` policy targets are looked up (and auto-registered, matching some `entity_types` entry's `name:`) by string, not a pre-resolved `EntityTypeId` — so `resource_type: entity_type` / `resource_id: File` in a policy row just needs to name the same string used as some entry's `name:`.
+
+See `crates/arbor-connectors/src/lib.rs` for the loader (`load_connector_config`, `load_data_model_config`, `load_all`) and `benches/src/bin/gen_company_dataset.rs` for a generator that produces a full multi-file dataset plus matching `connectors.yaml` / `data_model.yaml`.
 
 ### `example` (dev/test only)
 
@@ -141,8 +174,8 @@ type: example
 
 On startup, the indexer:
 
-1. Loads `connectors.yaml` and `entity_types.yaml`
-2. Validates that every `connector:` reference in `entity_types.yaml` resolves to a key in `connectors.yaml` — fails fast before opening any connections
+1. Loads `connectors.yaml` and `data_model.yaml`
+2. Validates that every `connector:` reference in `data_model.yaml` resolves to a key in `connectors.yaml` — fails fast before opening any connections
 3. Opens one connection pool per referenced connector
 4. Runs entity and policy queries (concurrently within each connector)
 5. Populates the `Graph`, then builds the initial snapshot

@@ -35,6 +35,27 @@ impl PolicyTarget {
     }
 }
 
+/// Simplified policy descriptor for ingestion; `EntityType` targets carry a
+/// human-readable type name instead of a pre-resolved `EntityTypeId`, mirroring
+/// how `EntityInput` defers type resolution to the graph.
+#[derive(Debug, Clone)]
+pub enum PolicyTargetInput {
+    Entity(Uuid),
+    EntityWithDescendants(Uuid),
+    EntityType(String),
+    All,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyInput {
+    pub id: Uuid,
+    pub name: String,
+    pub policy_type: PolicyType,
+    pub principal: PolicyTargetInput,
+    pub resource: PolicyTargetInput,
+    pub actions: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[derive(Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum IndexedPolicyTarget {
