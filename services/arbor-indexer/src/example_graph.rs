@@ -39,17 +39,17 @@ pub fn build() -> Graph {
     let policy_forbid_del_id  = id("policy:forbid-delete-files");
 
     // --- entities (type names resolved automatically) ---
-    graph.upsert_entity_from_input(EntityInput { id: admins_id, name: "admins".into(), type_name: "Group".into(), parents: vec![] })
+    graph.upsert_entity_from_input(EntityInput { id: admins_id, name: "admins".into(), type_name: "Group".into(), parents: vec![], attributes: vec![] })
         .expect("upsert admins");
     // alice is a member of admins (admins is her parent group)
-    graph.upsert_entity_from_input(EntityInput { id: alice_id, name: "alice".into(), type_name: "User".into(), parents: vec![admins_id] })
+    graph.upsert_entity_from_input(EntityInput { id: alice_id, name: "alice".into(), type_name: "User".into(), parents: vec![admins_id], attributes: vec![] })
         .expect("upsert alice");
-    graph.upsert_entity_from_input(EntityInput { id: bob_id, name: "bob".into(), type_name: "User".into(), parents: vec![] })
+    graph.upsert_entity_from_input(EntityInput { id: bob_id, name: "bob".into(), type_name: "User".into(), parents: vec![], attributes: vec![] })
         .expect("upsert bob");
-    graph.upsert_entity_from_input(EntityInput { id: reports_id, name: "reports/".into(), type_name: "Folder".into(), parents: vec![] })
+    graph.upsert_entity_from_input(EntityInput { id: reports_id, name: "reports/".into(), type_name: "Folder".into(), parents: vec![], attributes: vec![] })
         .expect("upsert reports/");
     // report.pdf lives inside reports/
-    graph.upsert_entity_from_input(EntityInput { id: report_pdf_id, name: "report.pdf".into(), type_name: "File".into(), parents: vec![reports_id] })
+    graph.upsert_entity_from_input(EntityInput { id: report_pdf_id, name: "report.pdf".into(), type_name: "File".into(), parents: vec![reports_id], attributes: vec![] })
         .expect("upsert report.pdf");
 
     // Resolve the "File" type id (already registered above via upsert_entity_from_input)

@@ -8,6 +8,30 @@ use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::rkyv_with::RoaringAsBytes;
 
+/// A scalar attribute value at ingestion time -- deliberately narrower than
+/// `AttributeValue` (no `Object`/`Set`/`Timestamp`/`IpAddr`/`IpNetwork`/
+/// `EntityRef`): a source declares one typed scalar per column, and nesting
+/// comes entirely from `AttributeInput::path` having multiple segments, not
+/// from a nested literal in the value itself.
+#[derive(Debug, Clone)]
+pub enum AttributeValueInput {
+    String(String),
+    Integer(i64),
+    Float(ordered_float::OrderedFloat<f64>),
+    Bool(bool),
+}
+
+/// One attribute to set on an ingested entity: a dotted path (e.g.
+/// `["consent_flags", "share_with_specialists"]`) and the scalar value at
+/// that path. Path segments are resolved to `AttributeNameId`s (creating
+/// them if not yet registered) at graph-build time, mirroring how
+/// `EntityInput::type_name` defers `EntityTypeId` resolution.
+#[derive(Debug, Clone)]
+pub struct AttributeInput {
+    pub path: Vec<String>,
+    pub value: AttributeValueInput,
+}
+
 /// Simplified entity descriptor for ingestion; uses a human-readable type name
 /// instead of a pre-resolved `EntityTypeId`.
 #[derive(Debug, Clone)]
@@ -16,6 +40,7 @@ pub struct EntityInput {
     pub name: String,
     pub type_name: String,
     pub parents: Vec<Uuid>,
+    pub attributes: Vec<AttributeInput>,
 }
 
 /// Represents an entity that can act as a principal, resource, or both

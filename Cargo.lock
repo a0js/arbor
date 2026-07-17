@@ -69,12 +69,14 @@ name = "arbor-bench"
 version = "0.1.0"
 dependencies = [
  "arbor-authorizer",
+ "arbor-connectors",
  "arbor-graph-core",
  "arbor-index-snapshot",
  "arbor-indexer",
  "arbor-types",
  "chrono",
  "criterion",
+ "csv",
  "ipnet",
  "libc",
  "lz4_flex",
@@ -107,6 +109,7 @@ dependencies = [
  "arbor-types",
  "config",
  "csv",
+ "ordered-float",
  "serde",
  "sqlx",
  "uuid",

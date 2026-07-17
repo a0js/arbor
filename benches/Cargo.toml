@@ -9,10 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 arbor-graph-core = { path = "../crates/arbor-graph-core" }
+arbor-connectors = { path = "../crates/arbor-connectors" }
 arbor-indexer = { path = "../services/arbor-indexer" }
 arbor-authorizer = { path = "../services/arbor-authorizer" }
 arbor-index-snapshot = { path = "../crates/arbor-index-snapshot" }
 arbor-types = { path = "../crates/arbor-types" }
+csv = "1.4.0"
 uuid = { version = "1.18.1", features = ["v4", "v5"] }
 roaring = "0.11.2"
 libc = "0.2"

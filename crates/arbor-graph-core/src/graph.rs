@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use rapidhash::{HashMapExt, RapidHashMap};
 use smallvec::SmallVec;
 use uuid::Uuid;
-use arbor_types::EntityTypeId;
+use arbor_types::{AttributeNameId, EntityTypeId};
 use crate::types;
 
 pub struct Graph {
@@ -12,9 +12,10 @@ pub struct Graph {
 
     pub parents: RapidHashMap<u32, HashSet<u32>>,
     pub children: RapidHashMap<u32, HashSet<u32>>,
-    
+
     pub uuid_to_index: RapidHashMap<Uuid, u32>,
     pub entity_type_names: RapidHashMap<EntityTypeId, String>,
+    pub attribute_names: RapidHashMap<AttributeNameId, String>,
 }
 
 impl Default for Graph {
@@ -35,6 +36,7 @@ impl Graph {
 
             uuid_to_index: RapidHashMap::new(),
             entity_type_names: RapidHashMap::new(),
+            attribute_names: RapidHashMap::new(),
         }
     }
 }

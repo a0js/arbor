@@ -133,7 +133,9 @@ connectors:
 
 `data_model.yaml` is where the data model lives, same as for `postgres` — except instead of a SQL query whose `AS` aliases do the column mapping, a CSV connector declares an explicit `columns:` mapping from Arbor's logical fields to that file's actual header names:
 
-**One file per entity type.** Each `entity_types` entry names exactly one entity type and one connector, so a full dataset needs one entry (and typically one CSV) per type. Each row has **at most one parent** (`parent_id`, optional) — this matches how most external systems export hierarchy (a single `manager_id` column), not an arbitrary multi-parent DAG. If a real source needs multiple parents per entity (e.g. group membership on top of an org chart), model that as a separate policy rather than a second parent column.
+**One file per entity type.** Each `entity_types` entry names exactly one entity type and one connector, so a full dataset needs one entry (and typically one CSV) per type. Most rows have **at most one parent** (`parent_id`, optional) — this matches how most external systems export hierarchy (a single `manager_id` column). Sources with genuine multi-parent structure (e.g. group membership layered on top of an org chart) can instead use `parent_ids`, a `;`-separated list of UUIDs mirroring the `actions` column's semicolon-list convention below — this is the CSV-side equivalent of the Postgres connector's `parent_ids uuid[]` column. Both `parent_id` and `parent_ids` may be set together; the resulting parents are their union, deduplicated.
+
+**Attribute columns (ABAC).** An `entity_types` entry can also declare `attributes:` — a list of `{path, column, value_type}` mappings, one per scalar CSV column. `path` is a dotted string (e.g. `consent_flags.share_with_specialists`); nesting comes entirely from a multi-segment path, never from the column's own value — there's no embedded JSON/object syntax in a cell. `value_type` is `string` | `integer` | `float` | `bool`, since a raw CSV string can't be typed by inspection alone.
 
 ```yaml
 entity_types:
@@ -143,6 +145,14 @@ entity_types:
       id: emp_id                 # required
       name: full_name            # required
       parent_id: manager_id      # optional; omit entirely for root-level entities
+      parent_ids: group_ids      # optional; ';'-separated UUIDs for additional parents (DAG)
+      attributes:                # optional; scalar columns mapped to (possibly nested) attribute paths
+        - path: consent_flags.share_with_specialists
+          column: share_specialists
+          value_type: bool
+        - path: age
+          column: age
+          value_type: integer
 
 policies:
   - connector: policies_csv
@@ -155,12 +165,60 @@ policies:
                                          # a type name for entity_type, ignored for all
       resource_type: resource_kind
       resource_id: resource
-      actions: action_ids               # semicolon-separated list of action UUIDs
+      actions: action_names             # ';'-separated action *names*, not UUIDs
+      action_sets: set_names            # optional; ';'-separated action-set names
+      condition: condition_text         # optional; free-text ABAC condition (see below)
+
+actions:
+  - connector: actions_csv
+    columns:
+      name: action_name
+      entity_type: scoped_type          # descriptive only, not part of the action's identity
+      description: notes                # optional
+
+action_sets:
+  - connector: action_sets_csv
+    columns:
+      name: set_name
+      actions: member_actions           # ';'-separated action names
+      description: notes                # optional
 ```
+
+**Condition grammar.** `policies.csv`'s optional `condition` column carries one free-text expression, parsed by `crates/arbor-connectors/src/condition_parser.rs` into arbor's `Condition` AST (`or` binds loosest, `not` tightest, `()` groups):
+
+```text
+expr       := or_expr
+or_expr    := and_expr ( "or" and_expr )*
+and_expr   := unary ( "and" unary )*
+unary      := "not" unary | "(" expr ")" | comparison
+comparison := operand ( binop operand )?
+binop      := "==" | "!=" | "<=" | ">=" | "<" | ">"
+            | "in" | "contains_all" | "contains_any" | "contains"
+            | "starts_with" | "ends_with" | "string_contains" | "like"
+            | "in_hierarchy"
+operand    := variable | string | number | "true" | "false" | set
+variable   := ("principal" | "resource" | "context") ( "." ident )*
+set        := "(" operand ( "," operand )* ")"
+```
+
+Examples:
+
+```text
+resource.consent_flags.share_with_specialists == true
+not (resource.restricted == true) or principal.clearance == "break_glass"
+resource.status in ("active", "pending")
+principal in_hierarchy "018e0000-0000-7000-8000-000000000001"
+```
+
+A variable's dotted path is resolved to attribute names the same lazy way an `entity_type` string is resolved to an `EntityTypeId` — created if not yet registered, not required to appear in any `attributes:` mapping first. `in_hierarchy`'s right-hand side must be a **quoted literal entity UUID**, resolved against the graph at build time (an unregistered UUID is a hard ingestion error, not a silent no-op) — consistent with `policies.csv`'s own `principal_id`/`resource_id` columns already requiring literal UUIDs rather than names.
+
+Not supported yet (no ingestion path needs them): `has_attribute`, `is_type`, `in_network`. Also deliberately not a condition-language concern: role checks like "is this principal a physician" belong in policy *targeting* (`principal_type: entity_type`, `principal_id: Physician`) or action sets, not in an attribute comparison — a condition should test entity *data*, not stand in for a target filter.
 
 `entity_type` policy targets are looked up (and auto-registered, matching some `entity_types` entry's `name:`) by string, not a pre-resolved `EntityTypeId` — so `resource_type: entity_type` / `resource_id: File` in a policy row just needs to name the same string used as some entry's `name:`.
 
-See `crates/arbor-connectors/src/lib.rs` for the loader (`load_connector_config`, `load_data_model_config`, `load_all`) and `benches/src/bin/gen_company_dataset.rs` for a generator that produces a full multi-file dataset plus matching `connectors.yaml` / `data_model.yaml`.
+**Actions and action sets are referenced by name, not UUID** — the way a real export actually has them (`"read_chart"`, never an internal Arbor UUID). `arbor-connectors` derives each one's UUID from its name via a single internal function (`action_id_for_name` / `action_set_id_for_name`), used consistently by `actions.csv`/`action_sets.csv` ingestion *and* by `policies.csv`'s `actions`/`action_sets` name lookups — there is deliberately no UUID column anywhere in this path, so there's nothing for two independently-written pieces of code (e.g. a dataset generator and the indexer) to disagree on. If `data_model.yaml` declares no `actions:` section at all, the indexer falls back to a standard `read`/`write`/`delete` set scoped to `File`, for compatibility with data models that predate the `actions:`/`action_sets:` sections.
+
+See `crates/arbor-connectors/src/lib.rs` for the loader (`load_connector_config`, `load_data_model_config`, `load_all`) and `benches/src/bin/gen_company_dataset.rs` / `benches/src/bin/gen_healthcare_dataset.rs` for generators that produce a full multi-file dataset plus matching `connectors.yaml` / `data_model.yaml`.
 
 ### `example` (dev/test only)
 

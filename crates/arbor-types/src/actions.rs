@@ -11,6 +11,20 @@ pub struct Action {
     pub description: Option<String>,
 }
 
+/// Simplified action descriptor for ingestion; uses a human-readable type
+/// name instead of a pre-resolved `EntityTypeId`, and carries an explicit
+/// `id` rather than one derived from `name` by a hashing convention -- a
+/// source of actions (a CSV, a config file) is the single place that ID is
+/// decided, so registration never has to agree with ingestion on how to
+/// derive it.
+#[derive(Debug, Clone)]
+pub struct ActionInput {
+    pub id: Uuid,
+    pub name: String,
+    pub type_name: String,
+    pub description: Option<String>,
+}
+
 impl Action {
     pub fn get_action_name(&self) -> &str {
         &self.name
@@ -31,4 +45,16 @@ pub struct ActionSet {
     pub name: String,
     pub description: Option<String>,
     pub actions: Vec<Uuid>
+}
+
+/// Simplified action-set descriptor for ingestion, mirroring `ActionInput`:
+/// member actions are already-resolved UUIDs (a source computes those the
+/// same way it computes its own actions' IDs), so there's no per-source
+/// lookup step needed to build one.
+#[derive(Debug, Clone)]
+pub struct ActionSetInput {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub actions: Vec<Uuid>,
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use crate::conditions::{Condition, VariableRef};
+use crate::conditions::{Condition, ConditionInput, VariableRef};
 use crate::ids::EntityTypeId;
 use uuid::Uuid;
 use crate::CompiledCondition;
@@ -54,6 +54,8 @@ pub struct PolicyInput {
     pub principal: PolicyTargetInput,
     pub resource: PolicyTargetInput,
     pub actions: Vec<Uuid>,
+    pub action_sets: Vec<Uuid>,
+    pub condition: Option<ConditionInput>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

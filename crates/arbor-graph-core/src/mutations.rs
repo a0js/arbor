@@ -1,5 +1,9 @@
 use uuid::Uuid;
-use arbor_types::{Action, ActionSet, ArborError, ArborResult, Entity, EntityInput, EntityTypeId, GraphError, Policy, PolicyInput, PolicyTarget, PolicyTargetInput};
+use arbor_types::{
+    Action, ActionSet, ArborError, ArborResult, AttributeNameId, AttributeValue, AttributeValueInput,
+    Attributes, Condition, ConditionInput, Entity, EntityInput, EntityTypeId, GraphError, Operand,
+    OperandInput, Policy, PolicyInput, PolicyTarget, PolicyTargetInput, VariableRef,
+};
 use roaring::RoaringBitmap;
 use crate::types::NodeType;
 
@@ -394,10 +398,47 @@ impl super::graph::Graph {
         id
     }
 
-    /// Upsert an entity described by an `EntityInput`, resolving the type name automatically.
+    /// Look up an `AttributeNameId` by name, creating and registering one if not found.
+    /// Mirrors `get_or_create_entity_type_id` -- same 1-indexed, linear-scan-then-append
+    /// scheme, since attribute vocabularies are small and this only runs at ingestion time.
+    pub fn get_or_create_attribute_name_id(&mut self, name: &str) -> AttributeNameId {
+        if let Some((&id, _)) = self.attribute_names.iter().find(|(_, v)| v.as_str() == name) {
+            return id;
+        }
+        let next_id = self.attribute_names.len() as u32 + 1;
+        let id = AttributeNameId::new(next_id);
+        self.attribute_names.insert(id, name.to_string());
+        id
+    }
+
+    /// Upsert an entity described by an `EntityInput`, resolving the type name and any
+    /// attribute paths automatically.
     pub fn upsert_entity_from_input(&mut self, input: EntityInput) -> ArborResult<()> {
         let type_id = self.get_or_create_entity_type_id(&input.type_name);
-        let entity = Entity::new(input.id, input.name, type_id, input.parents);
+
+        let mut attributes = Attributes::new();
+        for attr in input.attributes {
+            let path: Vec<AttributeNameId> = attr
+                .path
+                .iter()
+                .map(|segment| self.get_or_create_attribute_name_id(segment))
+                .collect();
+            let value = match attr.value {
+                AttributeValueInput::String(s) => AttributeValue::String(s),
+                AttributeValueInput::Integer(i) => AttributeValue::Integer(i),
+                AttributeValueInput::Float(f) => AttributeValue::Float(f),
+                AttributeValueInput::Bool(b) => AttributeValue::Bool(b),
+            };
+            attributes
+                .set_nested(&path, value)
+                .map_err(|e| ArborError::ConversionError(format!(
+                    "entity {} attribute {:?}: {e}",
+                    input.id, attr.path
+                )))?;
+        }
+
+        let mut entity = Entity::new(input.id, input.name, type_id, input.parents);
+        entity.attributes = attributes;
         self.upsert_entity(entity)
     }
 
@@ -412,11 +453,83 @@ impl super::graph::Graph {
         }
     }
 
+    fn resolve_operand_input(&mut self, operand: OperandInput) -> ArborResult<Operand> {
+        Ok(match operand {
+            OperandInput::String(s) => Operand::String(s),
+            OperandInput::Integer(i) => Operand::Integer(i),
+            OperandInput::Float(f) => Operand::Float(f),
+            OperandInput::Bool(b) => Operand::Bool(b),
+            OperandInput::EntityRef(id) => {
+                let idx = self
+                    .uuid_to_index
+                    .get(&id)
+                    .ok_or_else(|| ArborError::Graph(GraphError::NodeNotFound(id.to_string())))?;
+                Operand::EntityRef(*idx)
+            }
+            OperandInput::Set(items) => {
+                let resolved = items
+                    .into_iter()
+                    .map(|item| self.resolve_operand_input(item))
+                    .collect::<ArborResult<Vec<_>>>()?;
+                Operand::Set(resolved)
+            }
+            OperandInput::Variable(scope, path) => {
+                let path = path
+                    .iter()
+                    .map(|segment| self.get_or_create_attribute_name_id(segment))
+                    .collect();
+                Operand::Variable(VariableRef { scope, path })
+            }
+        })
+    }
+
+    /// Resolves a `ConditionInput` (raw attribute-path strings, raw entity UUIDs)
+    /// into a `Condition` (interned `AttributeNameId`s, resolved entity indices),
+    /// creating attribute names as needed -- same lazy-registration pattern as
+    /// `resolve_policy_target`'s `EntityType` case.
+    fn resolve_condition_input(&mut self, condition: ConditionInput) -> ArborResult<Condition> {
+        macro_rules! binop {
+            ($variant:ident, $l:expr, $r:expr) => {
+                Condition::$variant(self.resolve_operand_input($l)?, self.resolve_operand_input($r)?)
+            };
+        }
+        Ok(match condition {
+            ConditionInput::Operand(op) => Condition::Operand(self.resolve_operand_input(op)?),
+            ConditionInput::And(parts) => Condition::And(
+                parts.into_iter().map(|c| self.resolve_condition_input(c)).collect::<ArborResult<_>>()?,
+            ),
+            ConditionInput::Or(parts) => Condition::Or(
+                parts.into_iter().map(|c| self.resolve_condition_input(c)).collect::<ArborResult<_>>()?,
+            ),
+            ConditionInput::Not(inner) => Condition::Not(Box::new(self.resolve_condition_input(*inner)?)),
+            ConditionInput::Eq(l, r) => binop!(Eq, l, r),
+            ConditionInput::Neq(l, r) => binop!(Neq, l, r),
+            ConditionInput::Lt(l, r) => binop!(Lt, l, r),
+            ConditionInput::Lte(l, r) => binop!(Lte, l, r),
+            ConditionInput::Gt(l, r) => binop!(Gt, l, r),
+            ConditionInput::Gte(l, r) => binop!(Gte, l, r),
+            ConditionInput::In(l, r) => binop!(In, l, r),
+            ConditionInput::Contains(l, r) => binop!(Contains, l, r),
+            ConditionInput::ContainsAll(l, r) => binop!(ContainsAll, l, r),
+            ConditionInput::ContainsAny(l, r) => binop!(ContainsAny, l, r),
+            ConditionInput::StartsWith(l, r) => binop!(StartsWith, l, r),
+            ConditionInput::EndsWith(l, r) => binop!(EndsWith, l, r),
+            ConditionInput::StringContains(l, r) => binop!(StringContains, l, r),
+            ConditionInput::Like(l, r) => binop!(Like, l, r),
+            ConditionInput::InHierarchy(l, r) => binop!(InHierarchy, l, r),
+        })
+    }
+
     /// Upsert a policy described by a `PolicyInput`, resolving `EntityType` target
-    /// names to `EntityTypeId`s automatically (creating them if not yet registered).
+    /// names, condition attribute paths, and `in_hierarchy` entity references
+    /// automatically (creating attribute names as needed).
     pub fn upsert_policy_from_input(&mut self, input: PolicyInput) -> ArborResult<()> {
         let principal = self.resolve_policy_target(input.principal);
         let resource = self.resolve_policy_target(input.resource);
+        let condition = input
+            .condition
+            .map(|c| self.resolve_condition_input(c))
+            .transpose()?;
         let policy = Policy::new(
             input.id,
             input.name,
@@ -425,9 +538,142 @@ impl super::graph::Graph {
             principal,
             resource,
             input.actions,
-            vec![],
-            None,
+            input.action_sets,
+            condition,
         );
         self.upsert_policy(policy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+    use arbor_types::{AttributeInput, PolicyType, VariableScope};
+
+    #[test]
+    fn attribute_name_interner_is_stable_and_distinct() {
+        let mut graph = Graph::new();
+        let a1 = graph.get_or_create_attribute_name_id("consent_flags");
+        let a2 = graph.get_or_create_attribute_name_id("age");
+        let a1_again = graph.get_or_create_attribute_name_id("consent_flags");
+
+        assert_eq!(a1, a1_again, "same name must resolve to the same id");
+        assert_ne!(a1, a2, "different names must resolve to different ids");
+    }
+
+    #[test]
+    fn entity_input_attributes_resolve_to_nested_attributes() {
+        let mut graph = Graph::new();
+        let entity_id = Uuid::new_v4();
+        graph
+            .upsert_entity_from_input(EntityInput {
+                id: entity_id,
+                name: "Carol".into(),
+                type_name: "Patient".into(),
+                parents: vec![],
+                attributes: vec![
+                    AttributeInput {
+                        path: vec!["consent_flags".into(), "share_with_specialists".into()],
+                        value: AttributeValueInput::Bool(true),
+                    },
+                    AttributeInput {
+                        path: vec!["age".into()],
+                        value: AttributeValueInput::Integer(42),
+                    },
+                ],
+            })
+            .expect("upsert entity with attributes");
+
+        let age_id = graph.get_or_create_attribute_name_id("age");
+        let consent_id = graph.get_or_create_attribute_name_id("consent_flags");
+        let share_id = graph.get_or_create_attribute_name_id("share_with_specialists");
+
+        let idx = *graph.uuid_to_index.get(&entity_id).expect("entity indexed");
+        let entity = graph.nodes[idx as usize].as_entity().expect("is an entity");
+
+        assert_eq!(entity.get_attribute(&age_id), Some(&AttributeValue::Integer(42)));
+        assert_eq!(
+            entity.get_nested_attribute(&[consent_id, share_id]),
+            Some(&AttributeValue::Bool(true)),
+        );
+    }
+
+    #[test]
+    fn policy_condition_input_resolves_attribute_path_and_dependencies() {
+        let mut graph = Graph::new();
+        let patient_id = Uuid::new_v4();
+        graph
+            .upsert_entity_from_input(EntityInput {
+                id: patient_id,
+                name: "Carol".into(),
+                type_name: "Patient".into(),
+                parents: vec![],
+                attributes: vec![],
+            })
+            .expect("upsert patient");
+
+        let policy_id = Uuid::new_v4();
+        graph
+            .upsert_policy_from_input(PolicyInput {
+                id: policy_id,
+                name: "consent-gated-read".into(),
+                policy_type: PolicyType::Permit,
+                principal: PolicyTargetInput::All,
+                resource: PolicyTargetInput::Entity(patient_id),
+                actions: vec![],
+                action_sets: vec![],
+                condition: Some(ConditionInput::Eq(
+                    OperandInput::Variable(
+                        VariableScope::Resource,
+                        vec!["consent_flags".into(), "share_with_specialists".into()],
+                    ),
+                    OperandInput::Bool(true),
+                )),
+            })
+            .expect("upsert policy with condition");
+
+        let consent_id = graph.get_or_create_attribute_name_id("consent_flags");
+        let share_id = graph.get_or_create_attribute_name_id("share_with_specialists");
+
+        let idx = *graph.uuid_to_index.get(&policy_id).expect("policy indexed");
+        let policy = graph.nodes[idx as usize].as_policy().expect("is a policy");
+
+        match policy.conditions.as_ref().expect("condition resolved") {
+            Condition::Eq(Operand::Variable(var_ref), Operand::Bool(true)) => {
+                assert_eq!(var_ref.path, vec![consent_id, share_id]);
+            }
+            other => panic!("unexpected resolved condition: {other:?}"),
+        }
+
+        // `Policy::new` computes dependencies automatically from the resolved
+        // condition -- confirms resolution happens before dependency analysis,
+        // not after (which would silently produce an empty dependency list).
+        assert_eq!(
+            policy.dependencies,
+            vec![VariableRef { scope: VariableScope::Resource, path: vec![consent_id, share_id] }],
+        );
+    }
+
+    #[test]
+    fn policy_condition_input_rejects_unknown_in_hierarchy_target() {
+        let mut graph = Graph::new();
+        let missing_uuid = Uuid::new_v4();
+
+        let result = graph.upsert_policy_from_input(PolicyInput {
+            id: Uuid::new_v4(),
+            name: "bad-hierarchy-ref".into(),
+            policy_type: PolicyType::Permit,
+            principal: PolicyTargetInput::All,
+            resource: PolicyTargetInput::All,
+            actions: vec![],
+            action_sets: vec![],
+            condition: Some(ConditionInput::InHierarchy(
+                OperandInput::Variable(VariableScope::Principal, vec![]),
+                OperandInput::EntityRef(missing_uuid),
+            )),
+        });
+
+        assert!(result.is_err(), "in_hierarchy referencing an unregistered entity must fail, not silently resolve to nothing");
     }
 }

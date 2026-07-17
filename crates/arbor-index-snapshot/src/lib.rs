@@ -166,11 +166,30 @@ impl Snapshot {
         Self::resolve(&self.effective_resource_arena, r)
     }
 
-    /// Two-pointer merge of two sorted slices, filtered by membership in
-    /// `mask`. This is `check()`'s hot-path pattern: intersect two small
-    /// per-entity sets first, then only test the (few) survivors against a
-    /// larger `RoaringBitmap` like `action_to_policies`, instead of doing two
-    /// full `RoaringBitmap` ANDs.
+    /// Both principal- and resource-effective sets are usually small (a
+    /// handful to tens of entries), where the two-pointer merge below is
+    /// already near-optimal. But an entity broadly targeted by many
+    /// individually-targeted policies (e.g. thousands of `Entity`-scoped
+    /// forbids that all name the same principal type) can have an effective
+    /// set thousands of entries larger than the other side -- and the
+    /// two-pointer merge is `O(a.len() + b.len())` by *iteration count*
+    /// regardless of overlap, since a non-matching step only advances one
+    /// pointer without doing real work. Past this ratio, iterating the
+    /// smaller side and binary-searching each element into the larger one
+    /// (`O(min · log(max))`) is faster; below it, the extra log-factor
+    /// constant isn't worth paying since the sizes are close enough that
+    /// linear iteration finishes almost as fast either way. Found and
+    /// measured via `benches/src/bin/bench_healthcare_engine.rs`: a
+    /// 2705-vs-17 case cost ~1300ns via two-pointer merge (~2700 iterations,
+    /// confirmed by direct instrumentation) vs the ~14-27ns the same
+    /// function takes on similarly-sized sides.
+    const SIZE_RATIO_THRESHOLD: usize = 8;
+
+    /// Merges two sorted slices, filtered by membership in `mask`. This is
+    /// `check()`'s hot-path pattern: intersect two small per-entity sets
+    /// first, then only test the (few) survivors against a larger
+    /// `RoaringBitmap` like `action_to_policies`, instead of doing two full
+    /// `RoaringBitmap` ANDs.
     ///
     /// Returns a plain `Vec<u32>`, not a `RoaringBitmap` — the result is fed
     /// straight into `split_policy_map_for_authorization`, which itself only
@@ -178,6 +197,13 @@ impl Snapshot {
     /// the same small-object allocation cost this whole representation
     /// change was meant to eliminate.
     pub fn merge_and_filter_sorted(a: &[u32], b: &[u32], mask: &RoaringBitmap) -> Vec<u32> {
+        if a.len() > b.len() * Self::SIZE_RATIO_THRESHOLD {
+            return Self::binary_search_and_filter(b, a, mask);
+        }
+        if b.len() > a.len() * Self::SIZE_RATIO_THRESHOLD {
+            return Self::binary_search_and_filter(a, b, mask);
+        }
+
         let mut result = Vec::new();
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
@@ -196,6 +222,20 @@ impl Snapshot {
         result
     }
 
+    /// Iterates `smaller`, binary-searching each element into `larger` --
+    /// the lopsided-size counterpart to the two-pointer merge above. Result
+    /// is sorted ascending either way, since `smaller` is iterated in order
+    /// and each match is pushed at most once.
+    fn binary_search_and_filter(smaller: &[u32], larger: &[u32], mask: &RoaringBitmap) -> Vec<u32> {
+        let mut result = Vec::new();
+        for &x in smaller {
+            if mask.contains(x) && larger.binary_search(&x).is_ok() {
+                result.push(x);
+            }
+        }
+        result
+    }
+
     /// Filters a single sorted slice down to elements also present in `mask`.
     pub fn filter_sorted_by_mask(sorted: &[u32], mask: &RoaringBitmap) -> Vec<u32> {
         sorted.iter().copied().filter(|x| mask.contains(*x)).collect()
@@ -205,19 +245,31 @@ impl Snapshot {
     /// involved — both operands are per-entity/per-check-call sized).
     pub fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut result = Vec::new();
+        Self::intersect_sorted_into(a, b, &mut result);
+        result
+    }
+
+    /// Same intersection as `intersect_sorted`, writing into a caller-owned
+    /// `out` instead of allocating a fresh `Vec` -- for hot loops (e.g.
+    /// `list_entities`'s per-candidate verification, found via
+    /// `bench_healthcare_engine.rs` to spend ~40% of its ~34ns/candidate
+    /// cost on this allocation across tens of thousands of candidates) that
+    /// call this once per iteration and can reuse one scratch buffer's
+    /// capacity across the whole loop instead.
+    pub fn intersect_sorted_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+        out.clear();
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
             match a[i].cmp(&b[j]) {
                 std::cmp::Ordering::Less => i += 1,
                 std::cmp::Ordering::Greater => j += 1,
                 std::cmp::Ordering::Equal => {
-                    result.push(a[i]);
+                    out.push(a[i]);
                     i += 1;
                     j += 1;
                 }
             }
         }
-        result
     }
 
     pub fn get_policy(&self, idx: u32) -> Option<&IndexedPolicy> {
@@ -285,6 +337,25 @@ impl Snapshot {
             PolicySide::Resource => self.effective_resource_of(entity_idx),
         };
         Ok(Self::intersect_sorted(effective, mask))
+    }
+
+    /// Same as `get_effective_policies_intersected`, writing into a
+    /// caller-owned `out` instead of allocating -- see `intersect_sorted_into`.
+    pub fn get_effective_policies_intersected_into(
+        &self,
+        entity_idx: u32,
+        mask: &[u32],
+        side: PolicySide,
+        out: &mut Vec<u32>,
+    ) -> ArborResult<()> {
+        self.get_entity(entity_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", entity_idx)))?;
+        let effective = match side {
+            PolicySide::Principal => self.effective_principal_of(entity_idx),
+            PolicySide::Resource => self.effective_resource_of(entity_idx),
+        };
+        Self::intersect_sorted_into(effective, mask, out);
+        Ok(())
     }
 
     pub fn get_entity_type_id_by_name(&self, name: &str) -> Option<EntityTypeId> {
@@ -400,6 +471,16 @@ pub trait SnapshotOps: EntityResolver {
         mask: &[u32],
         side: PolicySide,
     ) -> ArborResult<Vec<u32>>;
+    /// Same as `get_effective_policies_intersected`, writing into a
+    /// caller-owned `out` instead of allocating -- for hot per-candidate
+    /// loops (e.g. `list_entities`'s conditional-candidate verification).
+    fn get_effective_policies_intersected_into(
+        &self,
+        entity_idx: u32,
+        mask: &[u32],
+        side: PolicySide,
+        out: &mut Vec<u32>,
+    ) -> ArborResult<()>;
     /// Upcast to `&dyn EntityResolver` for `EvaluationContext::new`, which
     /// takes a trait object -- needed until/unless trait upcasting coercion
     /// covers this case directly.
@@ -448,6 +529,15 @@ impl SnapshotOps for Snapshot {
         side: PolicySide,
     ) -> ArborResult<Vec<u32>> {
         Snapshot::get_effective_policies_intersected(self, entity_idx, mask, side)
+    }
+    fn get_effective_policies_intersected_into(
+        &self,
+        entity_idx: u32,
+        mask: &[u32],
+        side: PolicySide,
+        out: &mut Vec<u32>,
+    ) -> ArborResult<()> {
+        Snapshot::get_effective_policies_intersected_into(self, entity_idx, mask, side, out)
     }
     fn as_entity_resolver(&self) -> &dyn EntityResolver {
         self
@@ -793,6 +883,22 @@ impl SnapshotOps for RkyvSnapshot {
         };
         Ok(Snapshot::intersect_sorted(effective, mask))
     }
+    fn get_effective_policies_intersected_into(
+        &self,
+        entity_idx: u32,
+        mask: &[u32],
+        side: PolicySide,
+        out: &mut Vec<u32>,
+    ) -> ArborResult<()> {
+        self.get_entity(entity_idx)
+            .ok_or_else(|| ArborError::EntityNotFound(format!("Entity not found {}", entity_idx)))?;
+        let effective = match side {
+            PolicySide::Principal => SnapshotOps::effective_principal_of(self, entity_idx),
+            PolicySide::Resource => SnapshotOps::effective_resource_of(self, entity_idx),
+        };
+        Snapshot::intersect_sorted_into(effective, mask, out);
+        Ok(())
+    }
     fn as_entity_resolver(&self) -> &dyn EntityResolver {
         self
     }
@@ -919,5 +1025,130 @@ impl RkyvPackagedSnapshot {
     /// avoid.
     pub fn into_compressed_data(self) -> Vec<u8> {
         self.compressed_data
+    }
+}
+
+#[cfg(test)]
+mod merge_and_filter_sorted_tests {
+    use super::Snapshot;
+    use roaring::RoaringBitmap;
+
+    /// Reference oracle: the original always-two-pointer algorithm, kept
+    /// here (not in `Snapshot`) specifically so the property test below
+    /// checks the real implementation against independently-written logic,
+    /// not against itself.
+    fn naive_merge_and_filter(a: &[u32], b: &[u32], mask: &RoaringBitmap) -> Vec<u32> {
+        let mut result = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    if mask.contains(a[i]) {
+                        result.push(a[i]);
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn empty_inputs() {
+        let mask = RoaringBitmap::from_iter([1, 2, 3]);
+        assert_eq!(Snapshot::merge_and_filter_sorted(&[], &[], &mask), Vec::<u32>::new());
+        assert_eq!(Snapshot::merge_and_filter_sorted(&[1, 2], &[], &mask), Vec::<u32>::new());
+        assert_eq!(Snapshot::merge_and_filter_sorted(&[], &[1, 2], &mask), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn balanced_sizes_no_overlap() {
+        let mask = RoaringBitmap::from_iter(0..1000);
+        assert_eq!(Snapshot::merge_and_filter_sorted(&[1, 3, 5], &[2, 4, 6], &mask), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn balanced_sizes_full_overlap_filtered_by_mask() {
+        let a = [1, 2, 3, 4, 5];
+        let b = [1, 2, 3, 4, 5];
+        let mask = RoaringBitmap::from_iter([2, 4]);
+        assert_eq!(Snapshot::merge_and_filter_sorted(&a, &b, &mask), vec![2, 4]);
+    }
+
+    /// This is the exact shape the healthcare-dataset investigation found:
+    /// one side (thousands of entries) vastly larger than the other (tens),
+    /// with the single real match sitting at the far end of the larger
+    /// side's value range -- the case that made the two-pointer merge take
+    /// ~2700 iterations to find one element.
+    #[test]
+    fn lopsided_sizes_match_near_the_far_end() {
+        let small = [10u32, 20, 99_999];
+        let large: Vec<u32> = (0..100_000).collect();
+        let mask = RoaringBitmap::from_iter([99_999]);
+        assert_eq!(Snapshot::merge_and_filter_sorted(&small, &large, &mask), vec![99_999]);
+        // Symmetric: same result regardless of which argument is larger.
+        assert_eq!(Snapshot::merge_and_filter_sorted(&large, &small, &mask), vec![99_999]);
+    }
+
+    #[test]
+    fn lopsided_sizes_no_match() {
+        let small = [10u32, 20, 30];
+        let large: Vec<u32> = (100..100_000).collect();
+        let mask = RoaringBitmap::from_iter(0..200_000);
+        assert_eq!(Snapshot::merge_and_filter_sorted(&small, &large, &mask), Vec::<u32>::new());
+    }
+
+    /// Deterministic xorshift PRNG -- avoids adding a `rand` dev-dependency
+    /// for a single property test.
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next_u32(&mut self, bound: u32) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as u32
+        }
+    }
+
+    fn random_sorted_set(rng: &mut Xorshift, len: usize, value_range: u32) -> Vec<u32> {
+        let mut v: Vec<u32> = (0..len).map(|_| rng.next_u32(value_range)).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Property test: across many random combinations of sizes (including
+    /// heavily lopsided ones spanning the `SIZE_RATIO_THRESHOLD` boundary)
+    /// and overlap patterns, the size-adaptive implementation must produce
+    /// exactly the same result as the naive always-two-pointer oracle.
+    #[test]
+    fn matches_naive_oracle_across_random_size_and_overlap_combinations() {
+        let mut rng = Xorshift(0x9E3779B97F4A7C15);
+        let size_pairs = [
+            (0, 0), (1, 1), (5, 5), (5, 40), (40, 5),
+            (17, 2705), (2705, 17), (1, 5000), (5000, 1),
+            (100, 100), (3, 3000), (3000, 3),
+        ];
+        for &(len_a, len_b) in &size_pairs {
+            for trial in 0..20 {
+                let value_range = 200_000;
+                let a = random_sorted_set(&mut rng, len_a, value_range);
+                let b = random_sorted_set(&mut rng, len_b, value_range);
+                let mask_len = rng.next_u32(500) as usize;
+                let mask = RoaringBitmap::from_iter(
+                    (0..mask_len).map(|_| rng.next_u32(value_range)).collect::<Vec<_>>(),
+                );
+
+                let expected = naive_merge_and_filter(&a, &b, &mask);
+                let actual = Snapshot::merge_and_filter_sorted(&a, &b, &mask);
+                assert_eq!(
+                    actual, expected,
+                    "mismatch at len_a={len_a} len_b={len_b} trial={trial}"
+                );
+            }
+        }
     }
 }

@@ -128,6 +128,50 @@ pub enum VariableScope {
     Context,
 }
 
+/// Simplified operand for ingestion; mirrors `Operand` but a variable is a
+/// scope plus a human-readable dotted path (`Vec<String>`, resolved to
+/// `AttributeNameId`s at graph-build time) instead of a pre-resolved
+/// `VariableRef`, and an entity reference is a raw `Uuid` (resolved via
+/// `uuid_to_index` at graph-build time) instead of a pre-resolved index --
+/// same deferred-resolution shape as `PolicyTargetInput` vs `PolicyTarget`.
+#[derive(Debug, Clone)]
+pub enum OperandInput {
+    String(String),
+    Integer(i64),
+    Float(OrderedFloat<f64>),
+    Bool(bool),
+    EntityRef(uuid::Uuid),
+    Set(Vec<OperandInput>),
+    Variable(VariableScope, Vec<String>),
+}
+
+/// Simplified condition for ingestion; mirrors `Condition` one-to-one except
+/// `HasAttribute`, `IsType`, and `InNetwork` are omitted for now (no ingestion
+/// path needs them yet -- the same variants can be added here later without
+/// changing anything already built on this type).
+#[derive(Debug, Clone)]
+pub enum ConditionInput {
+    Operand(OperandInput),
+    And(Vec<ConditionInput>),
+    Or(Vec<ConditionInput>),
+    Not(Box<ConditionInput>),
+    Eq(OperandInput, OperandInput),
+    Neq(OperandInput, OperandInput),
+    Lt(OperandInput, OperandInput),
+    Lte(OperandInput, OperandInput),
+    Gt(OperandInput, OperandInput),
+    Gte(OperandInput, OperandInput),
+    In(OperandInput, OperandInput),
+    Contains(OperandInput, OperandInput),
+    ContainsAll(OperandInput, OperandInput),
+    ContainsAny(OperandInput, OperandInput),
+    StartsWith(OperandInput, OperandInput),
+    EndsWith(OperandInput, OperandInput),
+    StringContains(OperandInput, OperandInput),
+    Like(OperandInput, OperandInput),
+    InHierarchy(OperandInput, OperandInput),
+}
+
 impl TryFrom<AttributeValue> for Operand {
     type Error = ArborError;
 
